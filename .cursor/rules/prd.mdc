@@ -1,0 +1,613 @@
+# PRD - Sistema de Orçamento para Móveis Planejados
+
+## 📋 Visão Geral
+
+### Objetivo
+Desenvolver um sistema web para gestão de orçamentos de móveis planejados que permita importação de XMLs do Promob, cálculo automático de margens, controle de aprovações hierárquicas e geração de contratos.
+
+### Problema Atual
+- Processos manuais para cálculo de margem e comissões
+- Falta de controle de aprovações por hierarquia
+- Ausência de visibilidade de lucratividade para administradores
+- Processo descentralizado entre planilhas e sistemas diferentes
+
+### Solução Proposta
+Sistema integrado que automatiza desde a importação de ambientes até a assinatura de contratos, com controle total de custos, margens e aprovações.
+
+---
+
+## 👥 Personas e Hierarquia
+
+### 🎯 Vendedor
+**Objetivos:**
+- Cadastrar clientes rapidamente
+- Importar projetos do Promob facilmente
+- Criar orçamentos com planos de pagamento flexíveis
+- Aplicar descontos dentro de seus limites
+- Finalizar vendas com contratos
+
+**Dores:**
+- Demora para calcular margens manualmente
+- Incerteza sobre limites de desconto
+- Processo burocrático para aprovações
+
+### 👔 Gerente
+**Objetivos:**
+- Acompanhar performance da equipe
+- Aprovar descontos acima do limite dos vendedores
+- Gerenciar status dos orçamentos
+- Ter visão geral da loja
+
+**Dores:**
+- Falta de visibilidade sobre orçamentos pendentes
+- Processo manual de aprovação
+- Dificuldade para acompanhar margem real
+
+### 🏢 Administrador Master (Dono)
+**Objetivos:**
+- Configurar limites e regras por perfil
+- Visualizar lucratividade real de todas as lojas
+- Controlar custos operacionais
+- Tomar decisões estratégicas baseadas em dados
+
+**Dores:**
+- Falta de visibilidade sobre margem real
+- Impossibilidade de configurar regras centralizadamente
+- Ausência de relatórios consolidados
+
+---
+
+## 🎯 Funcionalidades Principais
+
+### 1. 📋 Gestão de Clientes
+
+#### Cadastro de Cliente
+**Funcionalidade:** Formulário completo para cadastro de novos clientes
+**Campos obrigatórios:**
+- Dados pessoais (Nome, CPF/CNPJ, RG/IE)
+- Contato (Email, Telefone)
+- Endereço completo
+- Tipo de venda (NORMAL/FUTURA)
+- **Procedência (canal de origem):** Indica o canal de marketing ou ponto de contato inicial que originou o lead/cliente (ex: Instagram, Site, Feira, Indicação Geral de Amigo). Este campo destina-se ao rastreamento da eficácia dos canais de aquisição e é distinto do eventual envolvimento de **indicadores específicos (ex: arquitetos, designers)** que possam ter direito a comissões. Comissões de indicadores específicos, quando aplicáveis no MVP, serão tratadas como um item dentro de "Outros Custos Configuráveis" do orçamento.
+
+**Regras de negócio:**
+- CPF/CNPJ pode repetir entre lojas diferentes
+- Validação de documentos obrigatória
+- Auto-preenchimento de endereço por CEP
+
+#### Lista de Clientes
+**Funcionalidade:** Tabela com todos os clientes da loja
+**Recursos:**
+- Busca por nome, CPF ou telefone
+- Filtros por procedência e tipo
+- Ações: Editar, Ver histórico, Criar ambiente
+
+### 2. 🏠 Gestão de Ambientes
+
+#### Importação XML Promob
+**Funcionalidade:** Upload e processamento de arquivos XML do Promob
+**Processo:**
+1. Upload do arquivo XML
+2. Extração automática de dados dos ambientes
+3. Criação de registros na tabela Ambientes
+4. Exibição de lista com valores individuais
+
+**Dados extraídos:**
+- Nome do ambiente
+- Valor individual
+- Detalhes técnicos (expandível com botão "+")
+- Informações de acabamentos por coleção
+
+#### Lista de Ambientes
+**Funcionalidade:** Visualização de todos os ambientes importados
+**Layout:**
+- Tabela com nome e valor de cada ambiente
+- Botão "+" para expandir detalhes técnicos
+- **Soma total automática no final**
+- Botão "Criar Orçamento" 
+
+**Regras:**
+- Todos os ambientes são incluídos automaticamente no orçamento
+- Não há seleção parcial de ambientes
+
+### 3. 💰 Gestão de Orçamentos
+
+#### Criação de Orçamento
+**Funcionalidade:** Orçamento automático com todos os ambientes + plano de pagamento
+
+**Estrutura:**
+- **Ambientes:** Todos os ambientes importados (automático)
+- **Valor base:** Soma total dos ambientes
+- **Desconto:** Aplicação de percentual pelo vendedor
+- **Plano de pagamento:** Múltiplas formas e datas
+
+**Exemplo de Plano de Pagamento:**
+```
+Total ambientes: R$ 22.500,00
+Desconto 20%: R$ 18.000,00
+
+PLANO:
+- Entrada: R$ 3.000,00 PIX (30/05/2025)
+- 12x R$ 1.000,00 Santander (dia 28, início 28/06/2025)
+- Intermediária: R$ 1.500,00 Boleto (18/08/2025)  
+- Intermediária: R$ 1.500,00 Boleto (18/12/2025)
+Total: R$ 18.000,00
+```
+
+#### Cálculo Automático de Custos
+**Funcionalidade:** Sistema calcula automaticamente todos os custos
+
+**Fórmula da Margem:**
+```
+Margem = Valor_Venda - (
+  + Custo_Fábrica (valor_xml × deflator_configurado)
+  + Comissão_Vendedor (por faixa de venda)
+  + Comissão_Gerente (por faixa de venda)  
+  + Custo_Montador (configurável)
+  + Custo_Transportadora (configurável)
+  + Custo_Medidor (valor fixo por medição)
+  + Outros custos configuráveis
+)
+```
+
+**Nota sobre "Outros Custos Configuráveis":**
+Estes são custos eventuais específicos de um orçamento que não se enquadram nas categorias de custos padrões (fábrica, comissões principais, montador, transportadora, medidor). Para o MVP, estes custos serão lançados individualmente, permitindo o registro de múltiplos itens com descrição e valor para cada orçamento (a serem armazenados na tabela `c_orcamento_custos_adicionais`). O somatório destes custos adicionais será utilizado como o valor de "Outros custos configuráveis" na fórmula da margem.
+
+*Exemplos de Outros Custos Configuráveis podem incluir: taxas específicas do projeto, aluguel de equipamentos especiais, ou comissões eventuais para indicadores (ex: arquitetos), quando aplicáveis e gerenciadas manualmente no contexto do MVP (dado que um sistema dedicado para o perfil "Indicador" está previsto para a V2).*
+
+**Custos Configuráveis (Resumo):**
+- ✅ Deflator para custo fábrica
+- ✅ Comissões por faixa de valor
+- ✅ Custos operacionais (montador, frete, medidor)
+- ✅ Mínimo garantido por vendedor (opcional)
+- ✅ Outros custos configuráveis (detalhados via `c_orcamento_custos_adicionais`)
+
+
+#### Sistema de Aprovação por Desconto
+**Funcionalidade:** Aprovação hierárquica baseada em limites de desconto
+
+**Fluxo:**
+1. Vendedor aplica desconto
+2. Se desconto > limite pessoal → Solicita aprovação
+3. **Hierarquia:** Vendedor → Gerente → Administrador
+4. Notificação automática para aprovador
+5. Aprovação libera mudança de status
+
+**Limites Configuráveis:**
+- Vendedor: até X% (ex: 15%)
+- Gerente: até Y% (ex: 25%)  
+- Admin: sem limite
+
+### 4. 📄 Gestão de Contratos
+
+#### Tela de Contrato
+**Funcionalidade:** Finalização e formalização da venda
+
+**Recursos:**
+1. **Visualização:** Contrato formatado para leitura ao cliente
+2. **Edição:** Ajustes de texto e condições
+3. **Impressão:** Versão para assinatura física
+4. **Assinatura Digital:** Integração para assinatura eletrônica (Pós-MVP)
+
+**Dados do Contrato:**
+- Informações do cliente e empresa
+- Lista de ambientes detalhada
+- Condições de pagamento
+- Prazos de entrega
+- Condições gerais
+
+### 5. 📊 Status e Workflow
+
+#### Gestão de Status
+**Funcionalidade:** Controle de pipeline de vendas
+
+**Status Padrão (MVP):**
+- **Negociação** (inicial - editável)
+- **Vendido** (fechado - editável)
+- **Futura** (comprou para entrega futura - editável)
+- **Perdido** (bloqueado para edição)
+
+**Recursos:**
+- Campo de observações por status
+- Status personalizáveis por loja (Admin configura)
+- Histórico de mudanças de status
+
+**Exemplo de Obs:**
+- Futura: "Cliente pega chaves do apartamento em dez/2025"
+- Perdido: "Preço muito alto para o cliente"
+
+### 6. ⚙️ Configurações do Sistema
+
+#### Painel Administrativo
+**Funcionalidade:** Configuração centralizada de regras de negócio
+
+**Configurações Essenciais:**
+
+**Limites de Desconto:**
+- Por perfil (Vendedor, Gerente, Admin)
+- Interface intuitiva para alteração
+- Efeito imediato no sistema
+
+**Regras de Comissão:**
+- Sistema escalonado por faixa de valor
+- Configuração: valor_mínimo → valor_máximo = percentual
+- Exemplo:
+  ```
+  R$ 0 → R$ 10.000 = 3%
+  R$ 10.001 → R$ 25.000 = 5%
+  R$ 25.001 → ∞ = 7%
+  ```
+
+**Custos Operacionais:**
+- Deflator para custo fábrica (%)
+- Valores fixos (Medidor: R$ 200)
+- Percentuais (Montador: 3%, Frete: 2%) - *Nota: A forma exata de configuração e aplicação destes percentuais (ex: sobre valor da venda) precisa ser detalhada na implementação.*
+- Seleção de quais custos incluir na margem
+
+**Mínimo Garantido:**
+- Por vendedor individualmente
+- Valor configurável ou zero
+- Opção ativa/inativa por pessoa
+
+#### Numeração Personalizada
+**Funcionalidade:** Continuidade da numeração atual
+- Primeira numeração inserida pelo usuário
+- Sistema incrementa automaticamente (+1)
+- Por loja independente
+
+### 7. 📈 Relatórios e Dashboard
+
+#### Relatório de Margem (Admin Master)
+**Funcionalidade:** Visibilidade completa da lucratividade
+
+**Dados Exibidos:**
+- Valor da venda
+- Custo fábrica detalhado
+- Comissão vendedor
+- Comissão gerente
+- Custo montador  
+- Custo transportadora
+- Outros custos configuráveis (soma dos itens de `c_orcamento_custos_adicionais`)
+- **Margem líquida final**
+
+**Filtros Disponíveis:**
+- Por período (data início/fim)
+- Por vendedor
+- Por cliente
+- Por status do orçamento
+- Por faixa de margem
+- Por loja (somente Admin Master)
+
+#### Dashboard Discreto
+**Funcionalidade:** Métricas essenciais sem exposição de margem
+- Total de orçamentos por status
+- Performance de vendedores (quantidade)
+- Ticket médio por período
+- Funil de conversão
+
+---
+
+## 🔐 Controle de Acesso e Permissões
+
+### Perfis e Permissões
+
+#### Vendedor
+**Pode:**
+- ✅ Cadastrar e editar clientes
+- ✅ Importar XMLs e criar ambientes
+- ✅ Criar orçamentos e planos de pagamento
+- ✅ Aplicar descontos dentro do limite
+- ✅ Solicitar aprovações
+- ✅ Alterar status (exceto Perdido)
+- ✅ Gerar contratos
+- ✅ Ver seus próprios orçamentos
+
+**Não pode:**
+- ❌ Ver margens ou custos detalhados
+- ❌ Configurar limites ou regras
+- ❌ Aprovar descontos de outros
+- ❌ Ver relatórios financeiros
+
+#### Gerente  
+**Pode (herda Vendedor +):**
+- ✅ Aprovar descontos da equipe
+- ✅ Ver orçamentos de todos da loja
+- ✅ Alterar qualquer status
+- ✅ Ver dashboard da loja
+- ✅ Gerenciar equipe da loja
+
+**Não pode:**
+- ❌ Ver margens detalhadas
+- ❌ Configurar regras globais
+- ❌ Ver outras lojas
+
+#### Administrador Master
+**Pode (acesso total):**
+- ✅ Todas as funcionalidades anteriores
+- ✅ Ver margem e lucratividade real
+- ✅ Configurar todas as regras
+- ✅ Ver relatórios de todas as lojas
+- ✅ Gerenciar usuários e perfis
+- ✅ Configurar deflators e custos
+
+### Segurança por Loja
+- **Row Level Security (RLS)** no Supabase
+- Usuários só veem dados da própria loja
+- Admin Master vê todas as lojas
+- Isolamento completo entre empresas
+
+---
+
+## 🛠️ Especificações Técnicas
+
+### Stack Tecnológica
+- **Frontend:** Next.js 14 + TypeScript + Tailwind CSS
+- **Backend:** FastAPI + Python
+- **Banco:** Supabase (PostgreSQL)
+- **Processamento:** Pandas para XMLs e relatórios
+- **Autenticação:** Supabase Auth
+- **Deploy:** Vercel (Frontend) + Railway/Render (Backend)
+
+### Arquitetura do Sistema
+
+#### Frontend (Next.js)
+**Responsabilidades:**
+- Interface de usuário responsiva
+- Gestão de estado (Zustand)
+- Validação de formulários (React Hook Form + Zod)
+- Upload de arquivos
+- Geração de PDFs (contratos)
+
+**Estrutura de Páginas:**
+```
+/dashboard
+/clientes
+/ambientes  
+/orcamentos
+/contratos
+/configuracoes
+/relatorios
+```
+
+#### Backend (FastAPI)
+**Responsabilidades:**
+- API REST para todas as operações
+- Processamento de XMLs do Promob
+- Cálculos de margem e comissões
+- Lógica de aprovações
+- Geração de relatórios
+
+**Endpoints Principais:**
+```
+POST /clientes
+GET/POST /ambientes/upload-xml
+POST /orcamentos
+PUT /orcamentos/{id}/aprovar
+POST /contratos
+GET /relatorios/margem
+```
+
+#### Banco de Dados (Supabase)
+**Estrutura Principal:**
+- ~18~ (aproximadamente 19-20 com a nova tabela `c_orcamento_custos_adicionais` e outras) tabelas conforme especificação no `shemma.md`.
+- RLS habilitado para isolamento
+- Triggers para auditoria
+- Índices otimizados para consultas
+
+### Processamento de XML
+
+#### Extração de Dados
+**Processo:**
+1. Upload do arquivo XML via frontend
+2. Envio para API FastAPI
+3. Parse usando biblioteca XML do Python
+4. Extração conforme regras das coleções
+5. Criação de registros na tabela Ambientes
+6. Retorno de dados estruturados
+
+**Coleções Suportadas:**
+- Coleção Unique
+- Coleção Sublime  
+- Portábille
+- Brilhart Color
+
+**Dados Extraídos:**
+- Nome do ambiente
+- Valor individual
+- Detalhes técnicos por coleção
+- Informações do cliente (quando disponível)
+
+### Cálculos Financeiros
+
+#### Engine de Cálculo
+**Responsabilidades:**
+- Cálculo automático de custos
+- Aplicação de regras de comissão por faixa
+- Verificação de mínimo garantido
+- Cálculo de margem final
+
+**Algoritmo de Comissão (Exemplo Simplificado):**
+```python
+def calcular_comissao(valor_venda, perfil, loja_id, user_id): # Adicionado user_id para mínimo garantido
+    regras = get_regras_comissao(perfil, loja_id) # Busca regras para Vendedor ou Gerente
+    comissao_calculada = 0
+
+    # Lógica de comissão progressiva por faixa (detalhar conforme Task Board)
+    # Exemplo simplificado abaixo considera apenas uma faixa que se aplique
+    for regra in regras:
+        # Aqui a lógica real seria mais complexa para aplicar faixas progressivas
+        # Este é um placeholder para a lógica correta de faixas
+        if valor_atingido_pela_faixa(valor_venda, regra.valor_minimo, regra.valor_maximo):
+             comissao_calculada += calcular_valor_da_faixa(valor_venda, regra.valor_minimo, regra.valor_maximo, regra.percentual)
+    
+    if perfil == 'VENDEDOR': # Mínimo garantido só se aplica a vendedor
+        minimo = get_minimo_garantido(user_id, loja_id) # Busca o mínimo garantido do vendedor
+        if comissao_calculada < minimo:
+            # Nota: O pagamento será o mínimo, mas a comissão para cálculo de margem do orçamento é a calculada.
+            # A diferença é um custo operacional da loja, não do orçamento específico.
+            pass # A comissão para o orçamento permanece a calculada. O pagamento ao vendedor é outra questão.
+
+    return comissao_calculada # Retorna a comissão que impacta o orçamento
+```
+*Nota: O algoritmo de comissão progressiva real será mais elaborado para tratar corretamente as faixas, conforme definido no Task Board. O tratamento do "Mínimo Garantido" também precisa de atenção para distinguir o valor pago ao vendedor versus o custo de comissão alocado ao orçamento.*
+
+---
+
+## 📋 Critérios de Aceite
+
+### 1. Gestão de Clientes
+- [ ] Cadastro de cliente com validação de CPF/CNPJ
+- [ ] Lista de clientes com busca e filtros
+- [ ] Edição de dados do cliente
+- [ ] Navegação para criação de ambientes
+
+### 2. Importação XML e Ambientes
+- [ ] Upload de arquivo XML do Promob
+- [ ] Extração correta de dados por coleção
+- [ ] Exibição de lista de ambientes com valores
+- [ ] Botão expandir para detalhes técnicos
+- [ ] Soma total automática e correta
+- [ ] Navegação para criação de orçamento
+
+### 3. Criação de Orçamento
+- [ ] Inclusão automática de todos os ambientes
+- [ ] Criação de plano de pagamento flexível
+- [ ] Aplicação de desconto com validação de limite
+- [ ] Cálculo automático correto de custos (incluindo `c_orcamento_custos_adicionais`)
+- [ ] Solicitação de aprovação quando necessário
+- [ ] Interface para adicionar/editar/remover itens em "Outros Custos Configuráveis" (`c_orcamento_custos_adicionais`)
+
+### 4. Sistema de Aprovação
+- [ ] Notificação para aprovador correto
+- [ ] Interface para aprovar/rejeitar
+- [ ] Bloqueio de edição durante aprovação
+- [ ] Histórico de aprovações
+
+### 5. Gestão de Status
+- [ ] Mudança de status com observações
+- [ ] Bloqueio de edição para status "Perdido"
+- [ ] Histórico de mudanças
+- [ ] Status personalizáveis por loja
+
+### 6. Contratos
+- [ ] Geração automática do contrato
+- [ ] Interface de edição
+- [ ] Impressão em PDF
+- [ ] Funcionalidade de assinatura (Pós-MVP)
+
+### 7. Configurações
+- [ ] Painel intuitivo para limites de desconto
+- [ ] Configuração de regras de comissão
+- [ ] Gestão de custos operacionais
+- [ ] Configuração de mínimo garantido
+
+### 8. Relatórios
+- [ ] Relatório de margem com todos os custos (incluindo soma de `c_orcamento_custos_adicionais`)
+- [ ] Filtros funcionais por período, vendedor, etc.
+- [ ] Dashboard discreto para perfis não-admin
+- [ ] Export em Excel/PDF
+
+### 9. Controle de Acesso
+- [ ] Login seguro por perfil
+- [ ] Isolamento por loja funcionando
+- [ ] Permissões corretas por funcionalidade
+- [ ] Admin Master vê todas as lojas
+
+### 10. Performance e UX
+- [ ] Upload de XML até 10MB em < 30 segundos
+- [ ] Interface responsiva (mobile-friendly)
+- [ ] Navegação intuitiva entre telas
+- [ ] Feedback visual para todas as ações
+
+---
+
+## 🚀 Plano de Desenvolvimento
+
+### Fase 1 - Core MVP (8 semanas)
+**Semanas 1-2:** Setup + Autenticação + Estrutura
+- Configuração do ambiente de desenvolvimento
+- Setup Supabase + tabelas + RLS
+- Sistema de autenticação
+- Layout base e navegação
+
+**Semanas 3-4:** Gestão de Clientes + Ambientes
+- CRUD de clientes
+- Upload e processamento de XML
+- Lista de ambientes com detalhes
+
+**Semanas 5-6:** Orçamentos + Aprovações
+- Criação de orçamento (incluindo gestão básica de "Outros Custos Configuráveis")
+- Engine de cálculo de custos
+- Sistema de aprovação hierárquica
+
+**Semanas 7-8:** Contratos + Configurações
+- Geração e edição de contratos
+- Painel de configurações
+- Testes e ajustes finais
+
+### Fase 2 - Relatórios e Refinamentos (4 semanas)
+**Semanas 9-10:** Relatórios e Dashboard
+- Relatório de margem completo
+- Dashboard por perfil
+- Filtros avançados
+
+**Semanas 11-12:** Polimento e Deploy
+- Testes de integração
+- Otimizações de performance  
+- Deploy em produção
+- Treinamento dos usuários
+
+### Fase 3 - Funcionalidades Avançadas (Futuro)
+- Assinatura digital de contratos
+- Integração com ERP/Financeiro
+- App mobile
+- Indicadores e Medidores como perfis (sistema dedicado)
+- Liberador Técnico / Definidor Técnico
+- Relatórios avançados com BI
+
+---
+
+## 📊 Métricas de Sucesso
+
+### Métricas de Produto
+- **Adoção:** 100% dos vendedores usando o sistema
+- **Eficiência:** Redução de 70% no tempo de criação de orçamento
+- **Qualidade:** 95% dos orçamentos aprovados sem retrabalho
+- **Satisfação:** NPS > 8 dos usuários
+
+### Métricas de Negócio
+- **Visibilidade:** Admin tem visão real da margem em 100% das vendas
+- **Controle:** 0% de vendas fora da política de desconto
+- **Agilidade:** Tempo de aprovação < 2 horas
+- **Precisão:** Margem calculada com 100% de assertividade
+
+---
+
+## 🔮 Roadmap Futuro
+
+### V2 - Expansão (6 meses)
+- **Perfis Avançados:** Indicador (sistema dedicado), Medidor (sistema dedicado), Liberador Técnico
+- **Assinatura Digital:** Integração com DocuSign/ClickSign
+- **BI Avançado:** Dashboards executivos com métricas estratégicas
+- **Mobile App:** Aplicativo para vendedores
+
+### V3 - Integração (12 meses)  
+- **ERP Integration:** Sincronização com sistemas contábeis
+- **E-commerce:** Portal do cliente para acompanhamento
+- **CRM Avançado:** Automação de marketing e follow-up
+- **IA/ML:** Sugestões de preço e predição de conversão
+
+---
+
+## 📝 Considerações Finais
+
+Este PRD define um sistema robusto que resolve os principais problemas atuais:
+
+✅ **Automatização** do cálculo de margem e custos
+✅ **Controle** total sobre aprovações e descontos  
+✅ **Visibilidade** completa para tomada de decisão
+✅ **Eficiência** no processo de venda
+✅ **Escalabilidade** para crescimento futuro
+
+O foco inicial é no MVP funcional que entrega valor imediato, com arquitetura preparada para evoluções futuras. A implementação prioriza UX intuitiva e performance, garantindo adoção pelos usuários finais.
+

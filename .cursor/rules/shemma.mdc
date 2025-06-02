@@ -1,0 +1,465 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Schema Completo Corrigido - Sistema Fluyt Módulo Comercial
+
+**Versão:** 2.0 Corrigida  
+**Data:** Junho 2025  
+**Prefixos:** `cad_` | `c_` | `config_` | logs sem prefixo  
+**Status:** ✅ TODOS OS CUSTOS MAPEADOS E RASTREÁVEIS  
+
+## Visão Geral
+
+Este documento define o schema completo do banco de dados PostgreSQL (Supabase) para o Sistema Fluyt, focado no módulo comercial de orçamentos para móveis planejados.
+
+### Principais Correções Aplicadas
+- ✅ **Percentuais corretos** (0.28 = 28%, não 28.00)
+- ✅ **RLS habilitado** com `loja_id` em todas as tabelas
+- ✅ **Sistema de comissão progressiva** por faixas
+- ✅ **Custos adicionais** por orçamento implementados
+- ✅ **Constraints únicos** para evitar duplicidades
+- ✅ **Triggers de numeração** automática
+
+## Enums Principais
+
+```sql
+create type perfil_usuario as enum ('VENDEDOR','GERENTE','MEDIDOR','ADMIN_MASTER');
+create type tipo_venda as enum ('NORMAL','FUTURA');
+create type categoria_montador as enum ('MARCENEIRO','MONTADOR_MOVEIS','ELETRICISTA','INSTALADOR_GERAL');
+create type status_pagamento as enum ('PENDENTE','PAGO','ATRASADO','CANCELADO');
+create type acao_aprovacao as enum ('SOLICITADO','APROVADO','REJEITADO','CANCELADO');
+create type formato_numeracao as enum ('SEQUENCIAL','ANO_SEQUENCIAL','PERSONALIZADO');
+```
+
+## Cadastros Base (cad_)
+
+### cad_empresas
+Empresas holding que possuem múltiplas lojas.
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| id | uuid PK | Identificador único |
+| nome | text | Nome da empresa |
+| cnpj | text UNIQUE | CNPJ da empresa |
+| created_at | timestamp | Data de criação |
+| updated_at | timestamp | Data de atualização |
+
+### cad_setores
+Setores organizacionais dentro de cada loja (Vendas, Medição, etc.).
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| id | uuid PK | Identificador único |
+| nome | text | Nome do setor |
+| loja_id | uuid FK | Referência para c_lojas |
+
+### cad_equipe
+Colaboradores da loja (vendedores, gerentes, medidores, admin).
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| id | uuid PK | Identificador único |
+| nome | text | Nome do colaborador |
+| email | text UNIQUE | Email único |
+| perfil | perfil_usuario | VENDEDOR/GERENTE/MEDIDOR/ADMIN_MASTER |
+| loja_id | uuid FK | Referência para c_lojas |
+| setor_id | uuid FK | Referência para cad_setores |
+| limite_desconto | numeric(5,2) | Limite individual de desconto |
+| comissao_percentual_vendedor | numeric(5,2) | Override comissão vendedor |
+| comissao_percentual_gerente | numeric(5,2) | Override comissão gerente |
+| tem_minimo_garantido | boolean | Se tem mínimo garantido |
+| valor_minimo_garantido | numeric(8,2) | Valor do mínimo garantido |
+| valor_medicao | numeric(8,2) | Valor por medição (perfil MEDIDOR) |
+| ativo | boolean | Se está ativo |
+
+**Regras de Negócio:**
+- Mínimo garantido é custo operacional, NÃO afeta margem do orçamento
+- Override individual substitui regras de faixa quando definido
+- Perfil MEDIDOR tem valor específico por medição
+
+### cad_montadores
+Prestadores de serviço de montagem por loja.
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| id | uuid PK | Identificador único |
+| nome | text | Nome do montador |
+| categoria | categoria_montador | Tipo de serviço |
+| loja_id | uuid FK | Referência para c_lojas |
+| valor | numeric(8,2) | Valor fixo do serviço |
+| ativo | boolean | Se está ativo |
+
+### cad_transportadoras
+Prestadores de serviço de transporte por loja.
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| id | uuid PK | Identificador único |
+| nome | text | Nome da transportadora |
+| loja_id | uuid FK | Referência para c_lojas |
+| valor_fixo | numeric(8,2) | Valor fixo por entrega |
+| ativo | boolean | Se está ativa |
+
+## Módulo Comercial (c_)
+
+### c_lojas
+Lojas individuais dentro de uma empresa.
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| id | uuid PK | Identificador único |
+| nome | text | Nome da loja |
+| endereco | text | Endereço da loja |
+| telefone | text | Telefone de contato |
+| email | text | Email da loja |
+| empresa_id | uuid FK | Referência para cad_empresas |
+| ativo | boolean | Se está ativa |
+
+### c_clientes
+Clientes da loja.
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| id | uuid PK | Identificador único |
+| nome | text | Nome do cliente |
+| cpf_cnpj | text | CPF ou CNPJ |
+| telefone | text | Telefone de contato |
+| email | text | Email do cliente |
+| endereco | text | Endereço completo |
+| cidade | text | Cidade |
+| cep | text | CEP |
+| loja_id | uuid FK | Referência para c_lojas |
+| tipo_venda | tipo_venda | NORMAL ou FUTURA |
+| observacao | text | Observações gerais |
+
+### c_ambientes
+Ambientes importados do XML do Promob.
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| id | uuid PK | Identificador único |
+| nome_ambiente | text | Nome do ambiente |
+| nome_cliente | text | Nome do cliente extraído |
+| valor_total | numeric(12,2) | Valor total do ambiente |
+| linha_produto | text | Coleção (Unique, Sublime, etc.) |
+| descricao_completa | text | Descrição detalhada |
+| detalhes_xml | jsonb | Dados técnicos extraídos |
+| loja_id | uuid FK | **CRÍTICO para RLS** |
+
+**Regra:** Todos os ambientes são SEMPRE incluídos no orçamento.
+
+### c_orcamentos
+Núcleo principal do sistema - orçamentos de venda.
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| id | uuid PK | Identificador único |
+| numero | text | Numeração manual configurável |
+| cliente_id | uuid FK | Referência para c_clientes |
+| loja_id | uuid FK | Referência para c_lojas |
+| vendedor_id | uuid FK | Vendedor responsável |
+| aprovador_id | uuid FK | Aprovador (opcional) |
+| medidor_selecionado_id | uuid FK | Medidor escolhido |
+| montador_selecionado_id | uuid FK | Montador escolhido |
+| transportadora_selecionada_id | uuid FK | Transportadora escolhida |
+
+**Valores Principais:**
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| valor_ambientes | numeric(12,2) | Soma dos ambientes |
+| desconto_percentual | numeric(5,2) | % de desconto aplicado |
+| valor_final | numeric(12,2) | Valor final para cliente |
+
+**Snapshot de Custos (calculado e salvo):**
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| custo_fabrica | numeric(12,2) | valor_xml × deflator |
+| comissao_vendedor | numeric(12,2) | Progressivo por faixa |
+| comissao_gerente | numeric(12,2) | Progressivo sobre equipe |
+| custo_medidor | numeric(8,2) | Valor do medidor |
+| custo_montador | numeric(12,2) | Valor do montador |
+| custo_frete | numeric(12,2) | Valor do frete |
+| margem_lucro | numeric(12,2) | **APENAS ADMIN MASTER vê** |
+
+**Auditoria:**
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| config_snapshot | jsonb | Configurações vigentes |
+| plano_pagamento | jsonb | Plano de pagamento |
+| necessita_aprovacao | boolean | Se precisa aprovação |
+| status_id | uuid FK | Status atual |
+
+### c_orcamento_ambientes
+Relacionamento entre orçamentos e ambientes.
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| id | uuid PK | Identificador único |
+| orcamento_id | uuid FK | Referência para c_orcamentos |
+| ambiente_id | uuid FK | Referência para c_ambientes |
+| incluido | boolean | Sempre TRUE |
+
+### c_orcamento_custos_adicionais
+**NOVA FUNCIONALIDADE:** Custos extras específicos por orçamento.
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| id | uuid PK | Identificador único |
+| orcamento_id | uuid FK | Referência para c_orcamentos |
+| descricao_custo | text | Descrição do custo |
+| valor_custo | numeric(12,2) | Valor do custo |
+
+**Exemplos:** Taxa de projeto especial, aluguel de equipamento, comissão de indicador.
+
+### c_contratos
+Contratos gerados a partir dos orçamentos.
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| id | uuid PK | Identificador único |
+| numero_contrato | text | Numeração manual |
+| orcamento_id | uuid FK | Referência para c_orcamentos |
+| empresa_id | uuid FK | Referência para cad_empresas |
+| valor_total | numeric(12,2) | Valor total do contrato |
+| condicoes | text | Condições contratuais |
+| assinado | boolean | Se foi assinado |
+| data_assinatura | timestamp | Data da assinatura |
+
+### c_parcelas_contrato
+Parcelas do plano de pagamento.
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| id | uuid PK | Identificador único |
+| contrato_id | uuid FK | Referência para c_contratos |
+| numero_parcela | int | Número da parcela |
+| valor_parcela | numeric(12,2) | Valor da parcela |
+| data_vencimento | timestamp | Data de vencimento |
+| status_pagamento | status_pagamento | Status do pagamento |
+
+### c_aprovacao_historico
+Histórico de aprovações de orçamentos.
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| id | uuid PK | Identificador único |
+| orcamento_id | uuid FK | Referência para c_orcamentos |
+| aprovador_id | uuid | ID do usuário aprovador |
+| acao | acao_aprovacao | Ação realizada |
+| nivel_aprovacao | text | Nível hierárquico |
+| valor_desconto | numeric(5,2) | % de desconto solicitado |
+| margem_resultante | numeric(12,2) | Margem após desconto |
+
+## Configurações (config_)
+
+### config_loja
+Configurações específicas por loja.
+
+| Campo | Tipo | Valor Padrão | Descrição |
+|-------|------|--------------|-----------|
+| id | uuid PK | - | Identificador único |
+| loja_id | uuid FK UNIQUE | - | Referência para c_lojas |
+
+**Custos Operacionais:**
+| Campo | Tipo | Padrão | Descrição |
+|-------|------|--------|-----------|
+| deflator_custo_fabrica | numeric(5,2) | 0.40 | 40% sobre valor XML |
+| valor_medidor_padrao | numeric(8,2) | 200.00 | Valor padrão medição |
+| valor_frete_percentual | numeric(5,2) | 0.02 | 2% sobre valor da venda (ÚNICO tipo de frete) |
+
+**Limites de Desconto:**
+| Campo | Tipo | Padrão | Descrição |
+|-------|------|--------|-----------|
+| limite_desconto_vendedor | numeric(5,2) | 0.15 | 15% |
+| limite_desconto_gerente | numeric(5,2) | 0.25 | 25% |
+
+**Numeração Manual:**
+| Campo | Tipo | Padrão | Descrição |
+|-------|------|--------|-----------|
+| numero_inicial_orcamento | int | 1 | Número inicial |
+| proximo_numero_orcamento | int | 1 | Próximo número |
+| formato_numeracao | formato_numeracao | SEQUENCIAL | Formato |
+| prefixo_numeracao | text | '' | Prefixo (ex: 'd-') |
+
+### config_regras_comissao_faixa
+**SISTEMA PROGRESSIVO** de comissão por faixas de valor.
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| id | uuid PK | Identificador único |
+| loja_id | uuid FK | Referência para c_lojas |
+| tipo_comissao | text | 'VENDEDOR' ou 'GERENTE' |
+| valor_minimo | numeric(12,2) | Valor mínimo da faixa |
+| valor_maximo | numeric(12,2) | Valor máximo (null = infinito) |
+| percentual | numeric(5,2) | % da faixa (ex: 0.05 = 5%) |
+| ordem | int | Ordem das faixas |
+
+**Exemplo Vendedor:**
+```
+Faixa 1: R$ 0 → R$ 25.000 = 5%
+Faixa 2: R$ 25.001 → R$ 50.000 = 6%  
+Faixa 3: R$ 50.001 → ∞ = 8%
+```
+
+**Cálculo:** Venda R$ 40.000 = (25.000 × 5%) + (15.000 × 6%) = R$ 2.150
+
+### config_status_orcamento
+Status configuráveis por loja para orçamentos.
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| id | uuid PK | Identificador único |
+| nome_status | text | Nome do status |
+| ordem | int | Ordem de exibição |
+| loja_id | uuid FK | Referência para c_lojas |
+| bloqueia_edicao | boolean | Se bloqueia edição |
+| is_default | boolean | Se é padrão (ÚNICO por loja) |
+| is_final | boolean | Se é status final |
+
+### config_historico_configuracoes
+Auditoria de mudanças nas configurações.
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| id | uuid PK | Identificador único |
+| loja_id | uuid FK | Referência para c_lojas |
+| tabela_alterada | text | Nome da tabela |
+| campo_alterado | text | Nome do campo |
+| valor_anterior | text | Valor anterior (JSON) |
+| valor_novo | text | Valor novo (JSON) |
+| alterado_por | uuid | ID do usuário |
+| data_alteracao | timestamp | Data da alteração |
+
+## Auditoria e Logs
+
+### auditoria_alteracoes
+Log geral de todas as alterações no sistema.
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| id | uuid PK | Identificador único |
+| tabela | text | Nome da tabela |
+| registro_id | text | ID do registro |
+| acao | text | INSERT/UPDATE/DELETE |
+| dados_antes | jsonb | Estado anterior |
+| dados_depois | jsonb | Estado posterior |
+| usuario_id | uuid | ID do usuário |
+| ip_address | text | IP do usuário |
+| user_agent | text | User agent |
+
+### xml_processing_logs
+Logs específicos do processamento de XMLs.
+
+| Campo | Tipo | Descrição |
+|-------|------|-----------|
+| id | uuid PK | Identificador único |
+| loja_id | uuid FK | Referência para c_lojas |
+| filename | text | Nome do arquivo |
+| status | text | success/error/processing |
+| error_details | jsonb | Detalhes do erro |
+| ambientes_criados | int | Quantidade criada |
+| valor_total | numeric(12,2) | Valor total |
+| colecoes_encontradas | text | Coleções identificadas |
+| processing_time | int | Tempo em ms |
+| created_by | uuid | ID do usuário |
+
+## Constraints e Índices Críticos
+
+### Constraints Únicos
+```sql
+-- Numeração única por loja
+unique_numero_loja (numero, loja_id)
+
+-- Status padrão único por loja  
+unique_default_status_per_loja (loja_id) where is_default = true
+
+-- Regras de comissão única por ordem
+unique_loja_tipo_ordem (loja_id, tipo_comissao, ordem)
+```
+
+### Índices de Performance
+```sql
+-- RLS e filtros por loja
+idx_orcamentos_loja_id
+idx_clientes_loja  
+idx_ambientes_loja
+idx_montadores_loja
+idx_transportadoras_loja
+
+-- Performance de consultas
+idx_orcamentos_vendedor_id
+idx_orcamentos_status_id
+idx_orcamentos_created_at
+idx_custos_adicionais_orcamento
+```
+
+## Triggers Automáticos
+
+### auto_increment_numero_orcamento()
+Gera numeração automática para orçamentos baseada na configuração da loja.
+
+### auto_increment_numero_contrato()  
+Gera numeração automática para contratos baseada no orçamento.
+
+## Regras de Negócio Críticas
+
+### 1. Sistema de Comissão
+- **Vendedor:** Progressivo por faixa sobre valor individual da venda
+- **Gerente:** Progressivo por faixa sobre total vendas da equipe no período
+- **Override individual:** Substitui faixas quando definido
+
+### 2. Mínimo Garantido
+- **NÃO afeta** cálculo de margem do orçamento
+- É custo operacional da empresa
+- Garante salário mínimo do vendedor
+
+### 3. Custos Adicionais
+- Múltiplos custos por orçamento
+- Impactam diretamente a margem
+- Exemplos: taxas especiais, comissões de indicadores
+
+### 4. RLS (Row Level Security)
+- **Obrigatório** em todas as tabelas principais
+- Usuário vê apenas dados da sua loja
+- Admin Master vê todas as lojas
+
+### 5. Visibilidade de Dados
+- **Vendedor:** NÃO vê custos nem margem
+- **Gerente:** Vê suas comissões, contexto de aprovação
+- **Admin Master:** Vê TUDO (custos, margens, lucratividade)
+
+### 6. Numeração Manual
+- Configurável por loja
+- Auto-incremento via trigger
+- Formato flexível (sequencial, ano+sequencial, personalizado)
+
+### 7. Ambientes XML
+- SEMPRE todos incluídos automaticamente
+- Não há seleção manual
+- Processamento baseado em 4 coleções específicas
+
+## Dados Iniciais
+
+O schema inclui dados de exemplo para:
+- 2 lojas (D-Art e Romanza)
+- Regras de comissão progressiva configuradas
+- Status padrão (Negociação, Vendido, Perdido)  
+- Montadores e transportadoras de exemplo
+- Configurações padrão por loja
+
+## Versioning
+
+**v1.0:** Schema inicial  
+**v2.0:** Correções críticas aplicadas
+- Percentuais corretos (0.28 vs 28.00)
+- RLS em c_ambientes  
+- Custos adicionais implementados
+- Constraints únicos adicionados
+- Triggers de numeração
+- Sistema de comissão progressiva completo
+
+---
+
+**⚠️ IMPORTANTE:** Este schema deve ser executado ANTES de habilitar RLS e configurar policies de segurança no Supabase.

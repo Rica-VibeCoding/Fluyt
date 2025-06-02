@@ -1,0 +1,32 @@
+# ===== CORE FASTAPI =====
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# ===== DATABASE & AUTH =====
+supabase==2.3.0
+postgrest==0.13.2
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# ===== HTTP & REQUESTS =====
+httpx==0.25.2
+requests==2.31.0
+
+# ===== ENVIRONMENT & CONFIG =====
+python-dotenv==1.0.0
+python-multipart==0.0.6
+
+# ===== XML PROCESSING =====
+pandas==2.1.4
+lxml==4.9.3
+xmltodict==0.13.0
+
+# ===== LOGGING & UTILS =====
+loguru==0.7.2
+tenacity==8.2.3
+
+# ===== DEVELOPMENT =====
+pytest==7.4.3
+pytest-asyncio==0.21.1
