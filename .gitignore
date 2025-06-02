@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.env
+.env.*
+
+# Node
+node_modules/
+
+# Vscode / Cursor
+.vscode/
+.cursor_rules/
+
+# Sistema
+*.DS_Store
+Thumbs.db
