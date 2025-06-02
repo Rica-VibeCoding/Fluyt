@@ -21,7 +21,6 @@ from .schemas import (
     RelatorioMargem
 )
 from .services import OrcamentoService
-from .repository import OrcamentoRepository
 
 # Router para o módulo de orçamentos
 router = APIRouter()
@@ -45,8 +44,7 @@ async def criar_orcamento(
     - **Verifica limites de desconto** e solicita aprovação se necessário
     - **Gera numeração** automática para o orçamento
     """
-    repository = OrcamentoRepository(db)
-    service = OrcamentoService(repository)
+    service = OrcamentoService(db)
     return await service.criar_orcamento(orcamento_data, current_user)
 
 
@@ -90,8 +88,7 @@ async def listar_orcamentos(
         valor_maximo=valor_maximo
     )
     
-    repository = OrcamentoRepository(db)
-    service = OrcamentoService(repository)
+    service = OrcamentoService(db)
     return await service.listar_orcamentos(filters, current_user, skip, limit)
 
 
@@ -112,8 +109,7 @@ async def obter_orcamento(
     - **Vendedor/Gerente:** Valores e dados básicos (sem custos detalhados)
     - **Admin Master:** Todos os dados incluindo custos e margem
     """
-    repository = OrcamentoRepository(db)
-    service = OrcamentoService(repository)
+    service = OrcamentoService(db)
     return await service.obter_orcamento(orcamento_id, current_user)
 
 
@@ -135,8 +131,7 @@ async def atualizar_orcamento(
     - **Verifica permissões** de edição
     - **Solicita nova aprovação** se o desconto for alterado
     """
-    repository = OrcamentoRepository(db)
-    service = OrcamentoService(repository)
+    service = OrcamentoService(db)
     return await service.atualizar_orcamento(orcamento_id, orcamento_data, current_user)
 
 
@@ -157,8 +152,7 @@ async def excluir_orcamento(
     - Vendedor só pode excluir seus próprios orçamentos
     - Gerente pode excluir orçamentos da equipe
     """
-    repository = OrcamentoRepository(db)
-    service = OrcamentoService(repository)
+    service = OrcamentoService(db)
     await service.excluir_orcamento(orcamento_id, current_user)
     return {"message": "Orçamento excluído com sucesso"}
 
@@ -180,8 +174,7 @@ async def solicitar_aprovacao(
     1. Vendedor → Gerente (até 25%)
     2. Gerente → Admin Master (acima de 25%)
     """
-    repository = OrcamentoRepository(db)
-    service = OrcamentoService(repository)
+    service = OrcamentoService(db)
     return await service.solicitar_aprovacao(orcamento_id, solicitacao, current_user)
 
 
@@ -201,8 +194,7 @@ async def processar_aprovacao(
     
     **Apenas aprovadores válidos** podem usar este endpoint.
     """
-    repository = OrcamentoRepository(db)
-    service = OrcamentoService(repository)
+    service = OrcamentoService(db)
     return await service.processar_aprovacao(orcamento_id, aprovado, justificativa, current_user)
 
 
@@ -221,8 +213,7 @@ async def calcular_custos(
     
     **Acesso restrito:** Apenas Admin Master pode ver custos detalhados.
     """
-    repository = OrcamentoRepository(db)
-    service = OrcamentoService(repository)
+    service = OrcamentoService(db)
     return await service.calcular_custos_detalhado(orcamento_id, current_user)
 
 
@@ -242,8 +233,7 @@ async def duplicar_orcamento(
     - Mantém todos os dados exceto número e data
     - Útil para orçamentos similares ao mesmo cliente
     """
-    repository = OrcamentoRepository(db)
-    service = OrcamentoService(repository)
+    service = OrcamentoService(db)
     return await service.duplicar_orcamento(orcamento_id, current_user)
 
 
@@ -277,8 +267,7 @@ async def relatorio_margem(
     **Acesso restrito:** Apenas Admin Master.
     **Dados incluídos:** Custos completos, margem líquida, percentual de margem.
     """
-    repository = OrcamentoRepository(db)
-    service = OrcamentoService(repository)
+    service = OrcamentoService(db)
     return await service.relatorio_margem(
         data_inicio, data_fim, vendedor_id, loja_id, 
         current_user, skip, limit
@@ -302,8 +291,7 @@ async def metricas_dashboard(
     - **Gerente:** Métricas da equipe
     - **Admin Master:** Métricas consolidadas
     """
-    repository = OrcamentoRepository(db)
-    service = OrcamentoService(repository)
+    service = OrcamentoService(db)
     return await service.obter_metricas_dashboard(periodo_dias, current_user)
 
 
@@ -318,8 +306,7 @@ async def listar_status_disponiveis(
     db: Client = Depends(get_database)
 ):
     """Lista todos os status configurados para a loja do usuário."""
-    repository = OrcamentoRepository(db)
-    service = OrcamentoService(repository)
+    service = OrcamentoService(db)
     return await service.listar_status_disponiveis(current_user)
 
 
@@ -333,6 +320,5 @@ async def historico_aprovacoes(
     db: Client = Depends(get_database)
 ):
     """Retorna histórico completo de aprovações de um orçamento."""
-    repository = OrcamentoRepository(db)
-    service = OrcamentoService(repository)
+    service = OrcamentoService(db)
     return await service.obter_historico_aprovacoes(orcamento_id, current_user)

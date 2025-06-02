@@ -1,0 +1,119 @@
+{
+  "timestamp": "2025-06-02 02:22:27",
+  "resumo": {
+    "total": 9,
+    "sucessos": 8,
+    "falhas": 1,
+    "taxa_sucesso": 88.88888888888889
+  },
+  "testes_criticos_ok": true,
+  "resultados_detalhados": [
+    {
+      "teste": "1. Buscar Dados Iniciais",
+      "sucesso": true,
+      "mensagem": "Dados carregados: 2 lojas, 2 funcionários",
+      "dados": {
+        "lojas_count": 2,
+        "equipe_count": 2,
+        "config_count": 1
+      }
+    },
+    {
+      "teste": "2. Criar Cliente Loja 1",
+      "sucesso": true,
+      "mensagem": "Cliente criado na loja D-Art Móveis",
+      "dados": {
+        "cliente_id": "cb7a34bd-3433-490c-9221-d52bcd412acf",
+        "loja": "D-Art Móveis"
+      }
+    },
+    {
+      "teste": "3. Criar Cliente Loja 2",
+      "sucesso": true,
+      "mensagem": "Cliente criado na loja Romanza Móveis",
+      "dados": {
+        "cliente_id": "bd494f35-5fe2-455d-bfa0-7b6aa01c3081",
+        "loja": "Romanza Móveis"
+      }
+    },
+    {
+      "teste": "4. Listar Clientes Loja 1",
+      "sucesso": true,
+      "mensagem": "Encontrados 0 clientes na loja D-Art Móveis",
+      "dados": {
+        "total_clientes": 0,
+        "loja": "D-Art Móveis"
+      }
+    },
+    {
+      "teste": "5. Criar Ambientes",
+      "sucesso": true,
+      "mensagem": "2 ambientes criados - Valor total: R$ 40,000.00",
+      "dados": {
+        "ambientes_count": 2,
+        "valor_total": 40000.0,
+        "ambiente1_id": "f7436343-3398-4497-a7a1-e6d5b6cd271c",
+        "ambiente2_id": "6862ec2d-6722-4f89-9dd2-57f572a4060b"
+      }
+    },
+    {
+      "teste": "6. Testar Cálculo R$ 40k",
+      "sucesso": true,
+      "mensagem": "Comissão calculada: R$ 2,400.00 - Esperada: R$ 2,400.00",
+      "dados": {
+        "valor_testado": 40000,
+        "comissao_calculada": 2400.0,
+        "comissao_esperada": 2400.0,
+        "diferenca": 0.0,
+        "calculo_correto": true,
+        "todos_custos": {
+          "custo_fabrica": 16000.0,
+          "comissao_vendedor": 2400.0,
+          "comissao_gerente": 240.0,
+          "custo_medidor": 200.0,
+          "custo_montador": 2000.0,
+          "custo_frete": 800.0,
+          "custos_adicionais": 0.0,
+          "margem_lucro": 18360.0,
+          "valor_final": 40000.0,
+          "total_custos": 21640.0
+        }
+      }
+    },
+    {
+      "teste": "7. Criar Orçamento Completo",
+      "sucesso": false,
+      "mensagem": "Erro de execução: 'NoneType' object is not subscriptable",
+      "dados": {}
+    },
+    {
+      "teste": "8. Validações Pydantic",
+      "sucesso": true,
+      "mensagem": "Validações Pydantic funcionando",
+      "dados": {
+        "teste_cliente_rejeitado": true,
+        "teste_calculo_rejeitado": true,
+        "detalhes": {
+          "teste_cliente_invalido": "6 validation errors for TestClienteCreate\nnome\n  String should have at least 1 character [type=string_too_short, input_value='', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.5/v/string_too_short\ncpf_cnpj\n  String should have at least 11 characters [type=string_too_short, input_value='123', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.5/v/string_too_short\ntelefone\n  String should have at least 10 characters [type=string_too_short, input_value='abc', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.5/v/string_too_short\nendereco\n  String should have at least 5 characters [type=string_too_short, input_value='', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.5/v/string_too_short\ncidade\n  String should have at least 2 characters [type=string_too_short, input_value='', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.5/v/string_too_short\ncep\n  String should have at least 8 characters [type=string_too_short, input_value='123', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.5/v/string_too_short",
+          "teste_calculo_invalido": "2 validation errors for TestCalculoEngine\nvalor_ambientes\n  Input should be greater than 0 [type=greater_than, input_value=Decimal('-1000'), input_type=Decimal]\n    For further information visit https://errors.pydantic.dev/2.5/v/greater_than\ndesconto_percentual\n  Input should be less than or equal to 100 [type=less_than_equal, input_value=Decimal('150'), input_type=Decimal]\n    For further information visit https://errors.pydantic.dev/2.5/v/less_than_equal",
+          "conclusao": "Validações funcionando se houve erros acima"
+        }
+      }
+    },
+    {
+      "teste": "9. Cenário Completo Auto",
+      "sucesso": true,
+      "mensagem": "Cenário completo: 5/6 etapas",
+      "dados": {
+        "etapas_executadas": 6,
+        "sucessos": 5,
+        "falhas": 1,
+        "calculo_40k_correto": true,
+        "comissao_calculada": 2400.0
+      }
+    }
+  ],
+  "erros": [
+    "7. Criar Orçamento Completo: Erro crítico - 'NoneType' object is not subscriptable"
+  ]
+}

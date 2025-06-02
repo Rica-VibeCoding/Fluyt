@@ -239,6 +239,12 @@ try:
     from modules.auditoria.controller import router as auditoria_router
     app.include_router(auditoria_router, prefix=f"{prefix}/auditoria", tags=["🔍 Auditoria"])
 
+    # ⚠️ ENDPOINTS TEMPORÁRIOS DE TESTE - SEM AUTENTICAÇÃO!
+    if settings.is_development:
+        from modules.test_endpoints.routes import router as test_router
+        app.include_router(test_router, prefix=f"{prefix}", tags=["🚨 TESTE TEMPORÁRIO"])
+        logger.warning("🚨 ENDPOINTS DE TESTE TEMPORÁRIOS ATIVADOS - REMOVER EM PRODUÇÃO!")
+
     logger.info("✅ Todos os routers modulares carregados com sucesso")
 
 except ImportError as e:

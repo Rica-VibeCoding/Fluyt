@@ -1,12 +1,14 @@
-# Business logic helpers for clientes
+"""
+Service layer para clientes - lógica de negócio e validações.
+Responsabilidade: Orquestração, validações, regras de negócio.
+"""
 
-from typing import Dict, Any, List, Optional
 import logging
+from typing import Dict, Any, List, Optional
 from datetime import datetime
-import uuid
 
 from .repository import ClienteRepository
-from .schemas import ClienteCreate, ClienteUpdate, ClienteResponse
+from .schemas import ClienteCreate, ClienteUpdate, ClienteResponse, ClienteListItem, ClienteFilters
 
 # Configurar logger
 logger = logging.getLogger(__name__)
@@ -14,24 +16,21 @@ logger = logging.getLogger(__name__)
 
 class ClienteService:
     """
-    Service layer para clientes - CRUD básico e validações
-    Stack: FastAPI + Python + Supabase (conforme PRD.md)
+    Service layer para clientes - lógica de negócio
     
-    Responsabilidade: Lógica de negócio, validações de cliente
+    Responsabilidade: Validações, regras de negócio, orquestração
     """
     
-    def __init__(self, repository: ClienteRepository):
-        self.repository = repository
-
-    # ===== MÉTODOS CRUD PARA CONTROLLERS =====
+    def __init__(self, supabase_client):
+        self.repository = ClienteRepository(supabase_client)
     
     async def criar_cliente(self, cliente_data: ClienteCreate, current_user: Dict[str, Any]) -> ClienteResponse:
         """
-        Cria novo cliente
+        Cria um novo cliente com validações de negócio
         
         Args:
             cliente_data: Dados do cliente
-            current_user: Usuário autenticado
+            current_user: Usuário logado (contém loja_id)
             
         Returns:
             ClienteResponse: Cliente criado
@@ -39,18 +38,19 @@ class ClienteService:
         try:
             loja_id = current_user['loja_id']
             
-            logger.info(f"Criando cliente {cliente_data.nome} para loja {loja_id}")
+            logger.info(f"Criando cliente {cliente_data.nome} na loja {loja_id}")
             
-            # Validar se CPF/CNPJ já existe na loja (regra de negócio)
-            if cliente_data.cpf_cnpj:
-                cliente_existente = await self.repository.buscar_por_cpf_cnpj(
-                    cliente_data.cpf_cnpj, loja_id
-                )
-                if cliente_existente:
-                    raise Exception(f"Cliente com CPF/CNPJ {cliente_data.cpf_cnpj} já existe nesta loja")
+            # Validar se CPF/CNPJ já existe na loja
+            cpf_cnpj_existe = await self.repository.verificar_cpf_cnpj_existente(
+                cliente_data.cpf_cnpj, 
+                loja_id
+            )
+            
+            if cpf_cnpj_existe:
+                raise Exception(f"CPF/CNPJ {cliente_data.cpf_cnpj} já está cadastrado nesta loja")
             
             # Preparar dados para inserção
-            dados_insercao = {
+            dados_cliente = {
                 'nome': cliente_data.nome,
                 'cpf_cnpj': cliente_data.cpf_cnpj,
                 'telefone': cliente_data.telefone,
@@ -58,218 +58,269 @@ class ClienteService:
                 'endereco': cliente_data.endereco,
                 'cidade': cliente_data.cidade,
                 'cep': cliente_data.cep,
-                'loja_id': loja_id,
-                'tipo_venda': cliente_data.tipo_venda.value if cliente_data.tipo_venda else 'NORMAL',
+                'tipo_venda': cliente_data.tipo_venda.value,
+                'procedencia': cliente_data.procedencia,
                 'observacao': cliente_data.observacao
             }
             
             # Criar cliente
-            cliente_criado = await self.repository.criar_cliente(dados_insercao)
+            cliente_criado = await self.repository.criar_cliente(dados_cliente, loja_id)
             
-            logger.info(f"Cliente {cliente_criado['id']} criado com sucesso")
+            logger.info(f"Cliente {cliente_data.nome} criado com sucesso: ID {cliente_criado['id']}")
             
+            # Retornar como ClienteResponse
             return ClienteResponse(**cliente_criado)
             
         except Exception as e:
             logger.error(f"Erro ao criar cliente: {str(e)}")
             raise Exception(f"Erro ao criar cliente: {str(e)}")
     
-    async def listar_clientes(self, current_user: Dict[str, Any], skip: int = 0, limit: int = 50, filtro_nome: Optional[str] = None, filtro_tipo: Optional[str] = None) -> List[ClienteResponse]:
+    async def listar_clientes(self, filters: Optional[ClienteFilters], current_user: Dict[str, Any], skip: int = 0, limit: int = 50) -> List[ClienteListItem]:
         """
-        Lista clientes da loja com filtros opcionais
+        Lista clientes com filtros aplicados
         
         Args:
-            current_user: Usuário autenticado
-            skip: Registros para pular
-            limit: Limite de registros
-            filtro_nome: Filtro por nome (opcional)
-            filtro_tipo: Filtro por tipo de venda (opcional)
+            filters: Filtros opcionais
+            current_user: Usuário logado
+            skip: Paginação - registros a pular
+            limit: Paginação - limite de registros
             
         Returns:
-            List[ClienteResponse]: Lista de clientes
+            List[ClienteListItem]: Lista de clientes
         """
         try:
             loja_id = current_user['loja_id']
             
-            logger.debug(f"Listando clientes para loja {loja_id}")
+            # Buscar clientes
+            clientes_data = await self.repository.listar_clientes(loja_id, filters, skip, limit)
             
-            clientes = await self.repository.listar_clientes(loja_id, skip, limit, filtro_nome, filtro_tipo)
+            # Converter para ClienteListItem
+            clientes = []
+            for cliente_data in clientes_data:
+                cliente_item = ClienteListItem(
+                    id=cliente_data['id'],
+                    nome=cliente_data['nome'],
+                    telefone=cliente_data['telefone'],
+                    email=cliente_data.get('email'),
+                    cidade=cliente_data['cidade'],
+                    tipo_venda=cliente_data['tipo_venda'],
+                    procedencia=cliente_data.get('procedencia'),
+                    created_at=cliente_data['created_at']
+                )
+                clientes.append(cliente_item)
             
-            return [ClienteResponse(**cliente) for cliente in clientes]
+            logger.debug(f"Listados {len(clientes)} clientes da loja {loja_id}")
+            return clientes
             
         except Exception as e:
             logger.error(f"Erro ao listar clientes: {str(e)}")
             raise Exception(f"Erro ao listar clientes: {str(e)}")
     
-    async def obter_cliente(self, cliente_id: uuid.UUID, current_user: Dict[str, Any]) -> ClienteResponse:
+    async def obter_cliente(self, cliente_id: str, current_user: Dict[str, Any]) -> ClienteResponse:
         """
         Obtém cliente por ID
         
         Args:
             cliente_id: ID do cliente
-            current_user: Usuário autenticado
+            current_user: Usuário logado
             
         Returns:
-            ClienteResponse: Dados do cliente
+            ClienteResponse: Cliente encontrado
         """
         try:
-            cliente = await self.repository.obter_cliente_por_id(str(cliente_id))
+            loja_id = current_user['loja_id']
             
-            if not cliente:
+            # Buscar cliente
+            cliente_data = await self.repository.obter_cliente(cliente_id, loja_id)
+            
+            if not cliente_data:
                 raise Exception("Cliente não encontrado")
             
-            # Verificar se cliente pertence à loja do usuário
-            if cliente['loja_id'] != current_user['loja_id'] and current_user['perfil'] != 'ADMIN_MASTER':
-                raise Exception("Sem permissão para acessar este cliente")
-            
-            return ClienteResponse(**cliente)
+            # Retornar como ClienteResponse
+            return ClienteResponse(**cliente_data)
             
         except Exception as e:
             logger.error(f"Erro ao obter cliente {cliente_id}: {str(e)}")
             raise Exception(f"Erro ao obter cliente: {str(e)}")
     
-    async def atualizar_cliente(self, cliente_id: uuid.UUID, cliente_data: ClienteUpdate, current_user: Dict[str, Any]) -> ClienteResponse:
+    async def atualizar_cliente(self, cliente_id: str, cliente_data: ClienteUpdate, current_user: Dict[str, Any]) -> ClienteResponse:
         """
         Atualiza cliente existente
         
         Args:
             cliente_id: ID do cliente
-            cliente_data: Dados para atualização
-            current_user: Usuário autenticado
+            cliente_data: Dados de atualização
+            current_user: Usuário logado
             
         Returns:
             ClienteResponse: Cliente atualizado
         """
         try:
-            # Verificar se cliente existe e permissões
-            cliente_atual = await self.repository.obter_cliente_por_id(str(cliente_id))
+            loja_id = current_user['loja_id']
             
+            # Verificar se cliente existe
+            cliente_atual = await self.repository.obter_cliente(cliente_id, loja_id)
             if not cliente_atual:
                 raise Exception("Cliente não encontrado")
             
-            if cliente_atual['loja_id'] != current_user['loja_id'] and current_user['perfil'] != 'ADMIN_MASTER':
-                raise Exception("Sem permissão para editar este cliente")
-            
-            # Verificar CPF/CNPJ duplicado se mudou
-            if cliente_data.cpf_cnpj and cliente_data.cpf_cnpj != cliente_atual['cpf_cnpj']:
-                cliente_existente = await self.repository.buscar_por_cpf_cnpj(
-                    cliente_data.cpf_cnpj, cliente_atual['loja_id']
-                )
-                if cliente_existente and cliente_existente['id'] != str(cliente_id):
-                    raise Exception(f"CPF/CNPJ {cliente_data.cpf_cnpj} já existe para outro cliente")
-            
-            # Preparar dados de atualização apenas com campos não-nulos
+            # Preparar dados de atualização (apenas campos fornecidos)
             dados_atualizacao = {}
             
             if cliente_data.nome is not None:
                 dados_atualizacao['nome'] = cliente_data.nome
-            if cliente_data.cpf_cnpj is not None:
-                dados_atualizacao['cpf_cnpj'] = cliente_data.cpf_cnpj
+            
             if cliente_data.telefone is not None:
                 dados_atualizacao['telefone'] = cliente_data.telefone
+            
             if cliente_data.email is not None:
                 dados_atualizacao['email'] = cliente_data.email
+            
             if cliente_data.endereco is not None:
                 dados_atualizacao['endereco'] = cliente_data.endereco
+            
             if cliente_data.cidade is not None:
                 dados_atualizacao['cidade'] = cliente_data.cidade
+            
             if cliente_data.cep is not None:
                 dados_atualizacao['cep'] = cliente_data.cep
+            
             if cliente_data.tipo_venda is not None:
                 dados_atualizacao['tipo_venda'] = cliente_data.tipo_venda.value
+            
+            if cliente_data.procedencia is not None:
+                dados_atualizacao['procedencia'] = cliente_data.procedencia
+            
             if cliente_data.observacao is not None:
                 dados_atualizacao['observacao'] = cliente_data.observacao
             
-            # Atualizar no banco
-            cliente_atualizado = await self.repository.atualizar_cliente(str(cliente_id), dados_atualizacao)
-            
-            logger.info(f"Cliente {cliente_id} atualizado com sucesso")
-            
-            return ClienteResponse(**cliente_atualizado)
+            # Atualizar apenas se há dados para atualizar
+            if dados_atualizacao:
+                cliente_atualizado = await self.repository.atualizar_cliente(
+                    cliente_id, 
+                    dados_atualizacao, 
+                    loja_id
+                )
+                
+                logger.info(f"Cliente {cliente_id} atualizado com sucesso")
+                return ClienteResponse(**cliente_atualizado)
+            else:
+                # Sem alterações, retornar cliente atual
+                return ClienteResponse(**cliente_atual)
             
         except Exception as e:
             logger.error(f"Erro ao atualizar cliente {cliente_id}: {str(e)}")
             raise Exception(f"Erro ao atualizar cliente: {str(e)}")
     
-    async def excluir_cliente(self, cliente_id: uuid.UUID, current_user: Dict[str, Any]):
+    async def excluir_cliente(self, cliente_id: str, current_user: Dict[str, Any]) -> bool:
         """
-        Exclui cliente (soft delete)
+        Exclui cliente com validações de negócio
         
         Args:
             cliente_id: ID do cliente
-            current_user: Usuário autenticado
+            current_user: Usuário logado
+            
+        Returns:
+            bool: True se excluído com sucesso
         """
         try:
-            cliente = await self.repository.obter_cliente_por_id(str(cliente_id))
+            loja_id = current_user['loja_id']
             
-            if not cliente:
+            # Verificar se cliente existe
+            cliente_atual = await self.repository.obter_cliente(cliente_id, loja_id)
+            if not cliente_atual:
                 raise Exception("Cliente não encontrado")
             
-            if cliente['loja_id'] != current_user['loja_id'] and current_user['perfil'] != 'ADMIN_MASTER':
-                raise Exception("Sem permissão para excluir este cliente")
+            # TODO: Verificar se cliente tem orçamentos/contratos associados
+            # Se sim, apenas marcar como inativo ou bloquear exclusão
             
-            # Verificar se cliente tem orçamentos (regra de negócio)
-            tem_orcamentos = await self.repository.verificar_cliente_tem_orcamentos(str(cliente_id))
-            if tem_orcamentos:
-                raise Exception("Cliente não pode ser excluído pois possui orçamentos")
+            # Excluir cliente
+            sucesso = await self.repository.excluir_cliente(cliente_id, loja_id)
             
-            await self.repository.excluir_cliente(str(cliente_id))
+            if sucesso:
+                logger.info(f"Cliente {cliente_id} ({cliente_atual['nome']}) excluído com sucesso")
             
-            logger.info(f"Cliente {cliente_id} excluído com sucesso")
+            return sucesso
             
         except Exception as e:
             logger.error(f"Erro ao excluir cliente {cliente_id}: {str(e)}")
             raise Exception(f"Erro ao excluir cliente: {str(e)}")
     
-    async def buscar_clientes(self, termo: str, current_user: Dict[str, Any]) -> List[ClienteResponse]:
+    async def buscar_cliente_por_cpf_cnpj(self, cpf_cnpj: str, current_user: Dict[str, Any]) -> Optional[ClienteResponse]:
         """
-        Busca clientes por termo (nome, CPF, telefone)
+        Busca cliente por CPF/CNPJ
         
         Args:
-            termo: Termo de busca
-            current_user: Usuário autenticado
+            cpf_cnpj: CPF ou CNPJ para buscar
+            current_user: Usuário logado
             
         Returns:
-            List[ClienteResponse]: Clientes encontrados
+            ClienteResponse ou None se não encontrado
         """
         try:
             loja_id = current_user['loja_id']
             
-            clientes = await self.repository.buscar_clientes(termo, loja_id)
+            # Limpar CPF/CNPJ (remover caracteres especiais)
+            cpf_cnpj_limpo = ''.join(filter(str.isdigit, cpf_cnpj))
             
-            return [ClienteResponse(**cliente) for cliente in clientes]
+            # Buscar usando filtros
+            filters = ClienteFilters(cpf_cnpj=cpf_cnpj_limpo)
+            clientes = await self.repository.listar_clientes(loja_id, filters, 0, 1)
+            
+            if clientes:
+                return ClienteResponse(**clientes[0])
+            else:
+                return None
+                
+        except Exception as e:
+            logger.error(f"Erro ao buscar cliente por CPF/CNPJ: {str(e)}")
+            raise Exception(f"Erro ao buscar cliente por CPF/CNPJ: {str(e)}")
+    
+    async def validar_dados_cliente(self, cliente_data: ClienteCreate) -> Dict[str, Any]:
+        """
+        Valida dados do cliente (regras de negócio específicas)
+        
+        Args:
+            cliente_data: Dados do cliente para validar
+            
+        Returns:
+            Dict com resultado da validação
+        """
+        try:
+            erros = []
+            warnings = []
+            
+            # Validação de CPF básica (algoritmo simplificado)
+            if len(cliente_data.cpf_cnpj) == 11:
+                # É CPF
+                if cliente_data.cpf_cnpj == cliente_data.cpf_cnpj[0] * 11:
+                    erros.append("CPF inválido: todos os dígitos são iguais")
+            
+            # Validação de telefone básica
+            if len(cliente_data.telefone.replace(' ', '').replace('-', '').replace('(', '').replace(')', '')) < 10:
+                erros.append("Telefone deve ter pelo menos 10 dígitos")
+            
+            # Validação de email mais rigorosa
+            if cliente_data.email and '.' not in cliente_data.email:
+                warnings.append("Email pode estar incompleto (sem domínio)")
+            
+            # Validação de CEP básica
+            cep_numeros = ''.join(filter(str.isdigit, cliente_data.cep))
+            if len(cep_numeros) != 8:
+                erros.append("CEP deve ter 8 dígitos")
+            
+            resultado = {
+                'valido': len(erros) == 0,
+                'erros': erros,
+                'warnings': warnings
+            }
+            
+            logger.debug(f"Validação cliente: {resultado}")
+            return resultado
             
         except Exception as e:
-            logger.error(f"Erro ao buscar clientes com termo '{termo}': {str(e)}")
-            raise Exception(f"Erro ao buscar clientes: {str(e)}")
-    
-    # ===== MÉTODOS AUXILIARES =====
-    
-    def _validar_cpf_cnpj(self, cpf_cnpj: str) -> bool:
-        """
-        Valida formato de CPF ou CNPJ
-        
-        Args:
-            cpf_cnpj: CPF ou CNPJ para validar
-            
-        Returns:
-            bool: True se válido
-        """
-        # TODO: Implementar validação de CPF/CNPJ
-        # Por enquanto apenas verificar se não está vazio
-        return bool(cpf_cnpj and cpf_cnpj.strip())
-    
-    def _normalizar_cpf_cnpj(self, cpf_cnpj: str) -> str:
-        """
-        Remove caracteres especiais do CPF/CNPJ
-        
-        Args:
-            cpf_cnpj: CPF ou CNPJ com formatação
-            
-        Returns:
-            str: CPF/CNPJ apenas com números
-        """
-        if not cpf_cnpj:
-            return ""
-        
-        return ''.join(char for char in cpf_cnpj if char.isdigit())
+            logger.error(f"Erro na validação: {str(e)}")
+            return {
+                'valido': False,
+                'erros': [f"Erro na validação: {str(e)}"],
+                'warnings': []
+            }

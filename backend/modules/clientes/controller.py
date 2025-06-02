@@ -4,7 +4,7 @@ Define endpoints REST para operações de cliente.
 """
 
 from fastapi import APIRouter, Depends, Query, HTTPException, status
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from core.auth import get_current_user, require_vendedor_ou_superior
 from core.database import get_database
 from supabase import Client
@@ -15,36 +15,32 @@ from .schemas import (
     ClienteUpdate,
     ClienteResponse,
     ClienteListItem,
-    ClienteBusca,
-    TipoVenda
+    ClienteFilters
 )
 from .services import ClienteService
-from .repository import ClienteRepository
 
 # Router para o módulo de clientes
-router = APIRouter(prefix='/clientes', tags=['clientes'])
+router = APIRouter()
 
 
-@router.post("/",
+@router.post("/", 
     response_model=ClienteResponse,
     summary="Criar novo cliente",
-    description="Cria um novo cliente na loja"
+    description="Cria um novo cliente na loja com validações de negócio"
 )
 async def criar_cliente(
     cliente_data: ClienteCreate,
-    current_user: dict = Depends(require_vendedor_ou_superior()),
+    current_user: Dict[str, Any] = Depends(require_vendedor_ou_superior()),
     db: Client = Depends(get_database)
 ):
     """
     Cria um novo cliente.
     
-    - **Validação automática** de CPF/CNPJ únicos por loja
-    - **RLS aplicado** automaticamente (cliente vinculado à loja do usuário)
-    - **Campos obrigatórios:** Nome
-    - **Campos opcionais:** CPF/CNPJ, contatos, endereço
+    - **Valida CPF/CNPJ** único na loja
+    - **Aplica validações** de dados obrigatórios
+    - **Registra procedência** para tracking de marketing
     """
-    repository = ClienteRepository(db)
-    service = ClienteService(repository)
+    service = ClienteService(db)
     return await service.criar_cliente(cliente_data, current_user)
 
 
@@ -55,61 +51,38 @@ async def criar_cliente(
 )
 async def listar_clientes(
     # Filtros opcionais
-    nome: Optional[str] = Query(None, description="Filtro por nome do cliente"),
-    tipo_venda: Optional[TipoVenda] = Query(None, description="Filtro por tipo de venda"),
+    nome: Optional[str] = Query(None, description="Filtro por nome (busca parcial)"),
+    cpf_cnpj: Optional[str] = Query(None, description="Filtro por CPF/CNPJ"),
+    telefone: Optional[str] = Query(None, description="Filtro por telefone"),
+    cidade: Optional[str] = Query(None, description="Filtro por cidade"),
+    tipo_venda: Optional[str] = Query(None, description="Filtro por tipo de venda (NORMAL/FUTURA)"),
+    procedencia: Optional[str] = Query(None, description="Filtro por procedência"),
     
     # Paginação
     skip: int = Query(0, ge=0, description="Registros a pular"),
     limit: int = Query(50, ge=1, le=200, description="Limite de registros"),
     
     # Dependências
-    current_user: dict = Depends(get_current_user),
+    current_user: Dict[str, Any] = Depends(get_current_user),
     db: Client = Depends(get_database)
 ):
     """
-    Lista clientes da loja com filtros aplicados.
+    Lista clientes com filtros aplicados.
     
-    **Filtros disponíveis:**
-    - **Nome:** Busca parcial no nome do cliente
-    - **Tipo de venda:** NORMAL ou FUTURA
-    
-    **Ordenação:** Data de criação (mais recentes primeiro)
+    **RLS aplicado:** Usuário vê apenas clientes da própria loja.
     """
-    repository = ClienteRepository(db)
-    service = ClienteService(repository)
-    return await service.listar_clientes(
-        current_user, 
-        skip, 
-        limit, 
-        filtro_nome=nome, 
-        filtro_tipo=tipo_venda.value if tipo_venda else None
+    # Constrói filtros
+    filters = ClienteFilters(
+        nome=nome,
+        cpf_cnpj=cpf_cnpj,
+        telefone=telefone,
+        cidade=cidade,
+        tipo_venda=tipo_venda,
+        procedencia=procedencia
     )
-
-
-@router.get("/buscar",
-    response_model=List[ClienteBusca],
-    summary="Buscar clientes",
-    description="Busca clientes por termo (nome, CPF, telefone)"
-)
-async def buscar_clientes(
-    termo: str = Query(..., min_length=2, description="Termo de busca"),
-    current_user: dict = Depends(get_current_user),
-    db: Client = Depends(get_database)
-):
-    """
-    Busca clientes por termo em múltiplos campos.
     
-    **Campos de busca:**
-    - Nome do cliente
-    - CPF/CNPJ
-    - Telefone
-    
-    **Limite:** 20 resultados máximo
-    **Uso:** Ideal para autocompletar ou seleção rápida
-    """
-    repository = ClienteRepository(db)
-    service = ClienteService(repository)
-    return await service.buscar_clientes(termo, current_user)
+    service = ClienteService(db)
+    return await service.listar_clientes(filters, current_user, skip, limit)
 
 
 @router.get("/{cliente_id}",
@@ -119,19 +92,16 @@ async def buscar_clientes(
 )
 async def obter_cliente(
     cliente_id: uuid.UUID,
-    current_user: dict = Depends(get_current_user),
+    current_user: Dict[str, Any] = Depends(get_current_user),
     db: Client = Depends(get_database)
 ):
     """
-    Obtém detalhes completos de um cliente.
+    Obtém detalhes de um cliente específico.
     
-    **Permissões:**
-    - **Usuários da loja:** Veem apenas clientes da própria loja
-    - **Admin Master:** Vê clientes de todas as lojas
+    **RLS aplicado:** Apenas clientes da mesma loja.
     """
-    repository = ClienteRepository(db)
-    service = ClienteService(repository)
-    return await service.obter_cliente(cliente_id, current_user)
+    service = ClienteService(db)
+    return await service.obter_cliente(str(cliente_id), current_user)
 
 
 @router.put("/{cliente_id}",
@@ -142,19 +112,17 @@ async def obter_cliente(
 async def atualizar_cliente(
     cliente_id: uuid.UUID,
     cliente_data: ClienteUpdate,
-    current_user: dict = Depends(require_vendedor_ou_superior()),
+    current_user: Dict[str, Any] = Depends(require_vendedor_ou_superior()),
     db: Client = Depends(get_database)
 ):
     """
     Atualiza um cliente existente.
     
-    - **Validação automática** de CPF/CNPJ únicos se alterado
-    - **Campos opcionais:** Apenas campos fornecidos são atualizados
-    - **Histórico:** Timestamp de atualização automático
+    - **Atualização parcial:** Apenas campos fornecidos são alterados
+    - **Mantém validações** de negócio
     """
-    repository = ClienteRepository(db)
-    service = ClienteService(repository)
-    return await service.atualizar_cliente(cliente_id, cliente_data, current_user)
+    service = ClienteService(db)
+    return await service.atualizar_cliente(str(cliente_id), cliente_data, current_user)
 
 
 @router.delete("/{cliente_id}",
@@ -163,18 +131,53 @@ async def atualizar_cliente(
 )
 async def excluir_cliente(
     cliente_id: uuid.UUID,
-    current_user: dict = Depends(require_vendedor_ou_superior()),
+    current_user: Dict[str, Any] = Depends(require_vendedor_ou_superior()),
     db: Client = Depends(get_database)
 ):
     """
     Exclui um cliente.
     
-    **Regras de negócio:**
-    - **Soft delete:** Cliente é marcado como inativo
-    - **Proteção:** Clientes com orçamentos não podem ser excluídos
-    - **Permissões:** Apenas usuários da mesma loja (+ Admin Master)
+    **Regras:**
+    - Soft delete (marca como excluído)
+    - Verifica se tem orçamentos associados
     """
-    repository = ClienteRepository(db)
-    service = ClienteService(repository)
-    await service.excluir_cliente(cliente_id, current_user)
+    service = ClienteService(db)
+    await service.excluir_cliente(str(cliente_id), current_user)
     return {"message": "Cliente excluído com sucesso"}
+
+
+@router.get("/buscar/cpf-cnpj",
+    response_model=Optional[ClienteResponse],
+    summary="Buscar cliente por CPF/CNPJ",
+    description="Busca cliente específico por CPF ou CNPJ"
+)
+async def buscar_cliente_por_cpf_cnpj(
+    cpf_cnpj: str = Query(..., description="CPF ou CNPJ para buscar"),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Client = Depends(get_database)
+):
+    """
+    Busca cliente por CPF/CNPJ.
+    
+    **Útil para:** Verificar se cliente já existe antes de criar novo.
+    """
+    service = ClienteService(db)
+    return await service.buscar_cliente_por_cpf_cnpj(cpf_cnpj, current_user)
+
+
+@router.post("/validar",
+    summary="Validar dados do cliente",
+    description="Valida dados do cliente sem criar registro"
+)
+async def validar_dados_cliente(
+    cliente_data: ClienteCreate,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+    db: Client = Depends(get_database)
+):
+    """
+    Valida dados do cliente aplicando regras de negócio.
+    
+    **Útil para:** Validação em tempo real no frontend.
+    """
+    service = ClienteService(db)
+    return await service.validar_dados_cliente(cliente_data)

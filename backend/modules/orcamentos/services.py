@@ -7,10 +7,9 @@ import logging
 from decimal import Decimal
 from datetime import datetime
 import uuid
-import json
 
 from .repository import OrcamentoRepository
-from .schemas import OrcamentoCreate, OrcamentoUpdate, OrcamentoResponse, OrcamentoListItem, OrcamentoFilters, SolicitacaoAprovacao, CalculoCustos, RelatorioMargem
+from .schemas import OrcamentoCreate, OrcamentoUpdate, OrcamentoResponse, OrcamentoListItem, OrcamentoFilters
 
 # Configurar logger
 logger = logging.getLogger(__name__)
@@ -24,13 +23,623 @@ class OrcamentoService:
     Responsabilidade: Lógica de negócio, cálculos, validações
     """
     
-    def __init__(self, repository: OrcamentoRepository):
-        self.repository = repository
+    def __init__(self, supabase_client):
+        self.repository = OrcamentoRepository(supabase_client)
+        self.supabase = supabase_client
     
-    def calcular_comissao_progressiva_pandas(self, valor_venda: float, regras_df: pd.DataFrame) -> Dict[str, Any]:
+    # ===== MÉTODOS CRUD BÁSICOS (conectar com Controllers) =====
+
+    async def criar_orcamento(self, orcamento_data: OrcamentoCreate, current_user: Dict[str, Any]) -> OrcamentoResponse:
         """
-        Engine de cálculo de comissão progressiva usando Pandas (conforme stack documentado)
-        Implementação EXATA do algoritmo especificado no PRD.md
+        Cria um novo orçamento com cálculos automáticos e validações
+        
+        Args:
+            orcamento_data: Dados do orçamento vindos do Controller
+            current_user: Usuário logado (contém loja_id)
+            
+        Returns:
+            OrcamentoResponse: Orçamento criado com todos os cálculos
+        """
+        try:
+            loja_id = current_user['loja_id']
+            vendedor_id = current_user['id']
+            
+            logger.info(f"Criando orçamento para cliente {orcamento_data.cliente_id} na loja {loja_id}")
+            
+            # 1. Buscar ambientes e calcular valor base
+            valor_ambientes = await self._calcular_valor_ambientes(orcamento_data.ambiente_ids, loja_id)
+            
+            # 2. Calcular valor final com desconto
+            desconto_decimal = float(orcamento_data.desconto_percentual) / 100
+            valor_final = valor_ambientes * (1 - desconto_decimal)
+            
+            # 3. Preparar dados para cálculo completo
+            dados_calculo = {
+                'loja_id': loja_id,
+                'vendedor_id': vendedor_id,
+                'valor_ambientes': valor_ambientes,
+                'desconto_percentual': desconto_decimal,
+                'custos_adicionais': [dict(item) for item in orcamento_data.custos_adicionais] if orcamento_data.custos_adicionais else []
+            }
+            
+            # 4. Calcular orçamento completo
+            calculo_completo = await self.criar_orcamento_completo(dados_calculo)
+            
+            # 5. Gerar numeração automática
+            numero = await self._gerar_numero_orcamento(loja_id)
+            
+            # 6. Buscar status padrão
+            status_padrao = await self._get_status_padrao(loja_id)
+            
+            # 7. Preparar dados para inserção
+            orcamento_db = {
+                'numero': numero,
+                'cliente_id': str(orcamento_data.cliente_id),
+                'loja_id': loja_id,
+                'vendedor_id': vendedor_id,
+                'medidor_selecionado_id': str(orcamento_data.medidor_selecionado_id),
+                'montador_selecionado_id': str(orcamento_data.montador_selecionado_id),
+                'transportadora_selecionada_id': str(orcamento_data.transportadora_selecionada_id),
+                'valor_ambientes': valor_ambientes,
+                'desconto_percentual': desconto_decimal,
+                'valor_final': calculo_completo['valor_final'],
+                'custo_fabrica': calculo_completo['custos']['custo_fabrica'],
+                'comissao_vendedor': calculo_completo['custos']['comissao_vendedor'],
+                'comissao_gerente': calculo_completo['custos']['comissao_gerente'],
+                'custo_medidor': calculo_completo['custos']['custo_medidor'],
+                'custo_montador': calculo_completo['custos']['custo_montador'],
+                'custo_frete': calculo_completo['custos']['custo_frete'],
+                'margem_lucro': calculo_completo['margem_lucro'],
+                'config_snapshot': calculo_completo.get('config_snapshot', {}),
+                'plano_pagamento': [dict(item) for item in orcamento_data.plano_pagamento],
+                'necessita_aprovacao': calculo_completo['necessita_aprovacao'],
+                'status_id': status_padrao['id'],
+                'observacoes': orcamento_data.observacoes
+            }
+            
+            # 8. Inserir orçamento
+            orcamento_result = (
+                self.supabase
+                .table('c_orcamentos')
+                .insert(orcamento_db)
+                .execute()
+            )
+            
+            if not orcamento_result.data:
+                raise Exception("Erro ao inserir orçamento")
+                
+            orcamento_criado = orcamento_result.data[0]
+            orcamento_id = orcamento_criado['id']
+            
+            # 9. Inserir relacionamentos com ambientes
+            await self._inserir_ambientes_orcamento(orcamento_id, orcamento_data.ambiente_ids)
+            
+            # 10. Inserir custos adicionais se existirem
+            if orcamento_data.custos_adicionais:
+                await self._inserir_custos_adicionais(orcamento_id, orcamento_data.custos_adicionais)
+            
+            logger.info(f"Orçamento {numero} criado com sucesso: R$ {valor_final:,.2f}")
+            
+            # 11. Retornar orçamento completo
+            return await self.obter_orcamento(orcamento_id, current_user)
+            
+        except Exception as e:
+            logger.error(f"Erro ao criar orçamento: {str(e)}")
+            raise Exception(f"Erro ao criar orçamento: {str(e)}")
+
+    async def listar_orcamentos(self, filters: OrcamentoFilters, current_user: Dict[str, Any], skip: int = 0, limit: int = 50) -> List[OrcamentoListItem]:
+        """
+        Lista orçamentos com filtros aplicados e respeitando permissões
+        
+        Args:
+            filters: Filtros aplicados
+            current_user: Usuário logado 
+            skip: Paginação - registros a pular
+            limit: Paginação - limite de registros
+            
+        Returns:
+            List[OrcamentoListItem]: Lista de orçamentos
+        """
+        try:
+            loja_id = current_user['loja_id']
+            perfil = current_user['perfil']
+            user_id = current_user['id']
+            
+            # Construir query base
+            query = (
+                self.supabase
+                .table('c_orcamentos')
+                .select('''
+                    id,
+                    numero,
+                    valor_final,
+                    necessita_aprovacao,
+                    created_at,
+                    c_clientes!inner(nome),
+                    config_status_orcamento!inner(nome_status),
+                    cad_equipe!inner(nome)
+                ''')
+                .eq('loja_id', loja_id)
+            )
+            
+            # Aplicar filtro por perfil
+            if perfil == 'VENDEDOR':
+                query = query.eq('vendedor_id', user_id)
+            # GERENTE e ADMIN_MASTER veem todos da loja
+            
+            # Aplicar filtros opcionais
+            if filters.vendedor_id:
+                query = query.eq('vendedor_id', str(filters.vendedor_id))
+            
+            if filters.status_id:
+                query = query.eq('status_id', str(filters.status_id))
+                
+            if filters.necessita_aprovacao is not None:
+                query = query.eq('necessita_aprovacao', filters.necessita_aprovacao)
+                
+            if filters.valor_minimo:
+                query = query.gte('valor_final', float(filters.valor_minimo))
+                
+            if filters.valor_maximo:
+                query = query.lte('valor_final', float(filters.valor_maximo))
+            
+            # Executar query com paginação
+            result = (
+                query
+                .order('created_at', desc=True)
+                .range(skip, skip + limit - 1)
+                .execute()
+            )
+            
+            # Converter para OrcamentoListItem
+            orcamentos = []
+            for item in result.data:
+                orcamento_item = OrcamentoListItem(
+                    id=item['id'],
+                    numero=item['numero'],
+                    cliente_nome=item['c_clientes']['nome'],
+                    valor_final=item['valor_final'],
+                    status_nome=item['config_status_orcamento']['nome_status'],
+                    necessita_aprovacao=item['necessita_aprovacao'],
+                    vendedor_nome=item['cad_equipe']['nome'],
+                    created_at=item['created_at']
+                )
+                orcamentos.append(orcamento_item)
+            
+            logger.debug(f"Listados {len(orcamentos)} orçamentos para {perfil} na loja {loja_id}")
+            return orcamentos
+            
+        except Exception as e:
+            logger.error(f"Erro ao listar orçamentos: {str(e)}")
+            raise Exception(f"Erro ao listar orçamentos: {str(e)}")
+
+    async def obter_orcamento(self, orcamento_id: str, current_user: Dict[str, Any]) -> OrcamentoResponse:
+        """
+        Obtém orçamento por ID com dados adaptados ao perfil do usuário
+        
+        Args:
+            orcamento_id: ID do orçamento
+            current_user: Usuário logado
+            
+        Returns:
+            OrcamentoResponse: Orçamento completo
+        """
+        try:
+            loja_id = current_user['loja_id']
+            perfil = current_user['perfil']
+            
+            # Buscar orçamento base
+            result = (
+                self.supabase
+                .table('c_orcamentos')
+                .select('*')
+                .eq('id', orcamento_id)
+                .eq('loja_id', loja_id)  # RLS: só da mesma loja
+                .execute()
+            )
+            
+            if not result.data:
+                raise Exception("Orçamento não encontrado")
+                
+            orcamento = result.data[0]
+            
+            # Verificar permissão por perfil
+            if perfil == 'VENDEDOR' and orcamento['vendedor_id'] != current_user['id']:
+                raise Exception("Acesso negado: vendedor só vê próprios orçamentos")
+            
+            # Buscar ambientes relacionados
+            ambientes = await self._get_ambientes_orcamento(orcamento_id)
+            
+            # Buscar custos adicionais
+            custos_adicionais = await self._get_custos_adicionais_orcamento(orcamento_id)
+            
+            # Montar resumo financeiro (dados sensíveis apenas para Admin Master)
+            resumo_financeiro = {
+                'valor_ambientes': orcamento['valor_ambientes'],
+                'desconto_aplicado': orcamento['valor_ambientes'] * orcamento['desconto_percentual'],
+                'valor_final': orcamento['valor_final']
+            }
+            
+            # Admin Master vê custos e margem
+            if perfil == 'ADMIN_MASTER':
+                resumo_financeiro.update({
+                    'custo_fabrica': orcamento['custo_fabrica'],
+                    'comissao_vendedor': orcamento['comissao_vendedor'],
+                    'comissao_gerente': orcamento['comissao_gerente'],
+                    'custo_medidor': orcamento['custo_medidor'],
+                    'custo_montador': orcamento['custo_montador'],
+                    'custo_frete': orcamento['custo_frete'],
+                    'total_custos_adicionais': sum(c['valor_custo'] for c in custos_adicionais),
+                    'margem_lucro': orcamento['margem_lucro']
+                })
+            
+            # Montar response
+            orcamento_response = OrcamentoResponse(
+                id=orcamento['id'],
+                numero=orcamento['numero'],
+                cliente_id=orcamento['cliente_id'],
+                loja_id=orcamento['loja_id'],
+                vendedor_id=orcamento['vendedor_id'],
+                status_id=orcamento['status_id'],
+                resumo_financeiro=resumo_financeiro,
+                ambientes=ambientes,
+                custos_adicionais=custos_adicionais,
+                plano_pagamento=orcamento['plano_pagamento'],
+                necessita_aprovacao=orcamento['necessita_aprovacao'],
+                aprovador_id=orcamento.get('aprovador_id'),
+                observacoes=orcamento.get('observacoes'),
+                created_at=orcamento['created_at'],
+                updated_at=orcamento['updated_at']
+            )
+            
+            return orcamento_response
+            
+        except Exception as e:
+            logger.error(f"Erro ao obter orçamento {orcamento_id}: {str(e)}")
+            raise Exception(f"Erro ao obter orçamento: {str(e)}")
+
+    async def atualizar_orcamento(self, orcamento_id: str, orcamento_data: OrcamentoUpdate, current_user: Dict[str, Any]) -> OrcamentoResponse:
+        """
+        Atualiza orçamento existente com recálculos automáticos
+        
+        Args:
+            orcamento_id: ID do orçamento
+            orcamento_data: Dados de atualização
+            current_user: Usuário logado
+            
+        Returns:
+            OrcamentoResponse: Orçamento atualizado
+        """
+        try:
+            # Verificar se orçamento existe e usuário tem permissão
+            orcamento_atual = await self.obter_orcamento(orcamento_id, current_user)
+            
+            # Preparar dados de atualização
+            dados_atualizacao = {}
+            
+            # Se há mudança de desconto, recalcular tudo
+            if orcamento_data.desconto_percentual is not None:
+                novo_desconto = float(orcamento_data.desconto_percentual) / 100
+                valor_ambientes = orcamento_atual.resumo_financeiro.valor_ambientes
+                novo_valor_final = valor_ambientes * (1 - novo_desconto)
+                
+                # Recalcular todos os custos
+                dados_calculo = {
+                    'loja_id': current_user['loja_id'],
+                    'vendedor_id': orcamento_atual.vendedor_id,
+                    'valor_ambientes': valor_ambientes,
+                    'desconto_percentual': novo_desconto,
+                    'custos_adicionais': []  # TODO: carregar custos existentes se necessário
+                }
+                
+                calculo_completo = await self.criar_orcamento_completo(dados_calculo)
+                
+                dados_atualizacao.update({
+                    'desconto_percentual': novo_desconto,
+                    'valor_final': calculo_completo['valor_final'],
+                    'custo_fabrica': calculo_completo['custos']['custo_fabrica'],
+                    'comissao_vendedor': calculo_completo['custos']['comissao_vendedor'],
+                    'comissao_gerente': calculo_completo['custos']['comissao_gerente'],
+                    'custo_frete': calculo_completo['custos']['custo_frete'],
+                    'margem_lucro': calculo_completo['margem_lucro'],
+                    'necessita_aprovacao': calculo_completo['necessita_aprovacao']
+                })
+            
+            # Outras atualizações simples
+            if orcamento_data.medidor_selecionado_id:
+                dados_atualizacao['medidor_selecionado_id'] = str(orcamento_data.medidor_selecionado_id)
+                
+            if orcamento_data.montador_selecionado_id:
+                dados_atualizacao['montador_selecionado_id'] = str(orcamento_data.montador_selecionado_id)
+                
+            if orcamento_data.transportadora_selecionada_id:
+                dados_atualizacao['transportadora_selecionada_id'] = str(orcamento_data.transportadora_selecionada_id)
+                
+            if orcamento_data.plano_pagamento:
+                dados_atualizacao['plano_pagamento'] = [dict(item) for item in orcamento_data.plano_pagamento]
+                
+            if orcamento_data.observacoes is not None:
+                dados_atualizacao['observacoes'] = orcamento_data.observacoes
+            
+            # Executar atualização
+            if dados_atualizacao:
+                dados_atualizacao['updated_at'] = datetime.utcnow().isoformat()
+                
+                update_result = (
+                    self.supabase
+                    .table('c_orcamentos')
+                    .update(dados_atualizacao)
+                    .eq('id', orcamento_id)
+                    .execute()
+                )
+                
+                if not update_result.data:
+                    raise Exception("Erro ao atualizar orçamento")
+            
+            logger.info(f"Orçamento {orcamento_id} atualizado com sucesso")
+            
+            # Retornar orçamento atualizado
+            return await self.obter_orcamento(orcamento_id, current_user)
+            
+        except Exception as e:
+            logger.error(f"Erro ao atualizar orçamento {orcamento_id}: {str(e)}")
+            raise Exception(f"Erro ao atualizar orçamento: {str(e)}")
+
+    async def excluir_orcamento(self, orcamento_id: str, current_user: Dict[str, Any]) -> bool:
+        """
+        Exclui orçamento (soft delete) com validações de permissão
+        
+        Args:
+            orcamento_id: ID do orçamento
+            current_user: Usuário logado
+            
+        Returns:
+            bool: True se excluído com sucesso
+        """
+        try:
+            # Verificar se orçamento existe e usuário tem permissão
+            orcamento = await self.obter_orcamento(orcamento_id, current_user)
+            
+            # Verificar se pode ser excluído (apenas status Negociação)
+            # TODO: implementar verificação de status quando necessário
+            
+            # Soft delete (marcar como excluído)
+            delete_result = (
+                self.supabase
+                .table('c_orcamentos')
+                .update({
+                    'excluido': True,
+                    'excluido_em': datetime.utcnow().isoformat(),
+                    'excluido_por': current_user['id']
+                })
+                .eq('id', orcamento_id)
+                .execute()
+            )
+            
+            logger.info(f"Orçamento {orcamento_id} excluído com sucesso")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Erro ao excluir orçamento {orcamento_id}: {str(e)}")
+            raise Exception(f"Erro ao excluir orçamento: {str(e)}")
+
+    # ===== MÉTODOS AUXILIARES =====
+
+    async def _calcular_valor_ambientes(self, ambiente_ids: List[str], loja_id: str) -> float:
+        """Calcula valor total dos ambientes selecionados"""
+        try:
+            result = (
+                self.supabase
+                .table('c_ambientes')
+                .select('valor_total')
+                .in_('id', [str(id) for id in ambiente_ids])
+                .eq('loja_id', loja_id)
+                .execute()
+            )
+            
+            total = sum(float(item['valor_total']) for item in result.data)
+            logger.debug(f"Valor total dos ambientes: R$ {total:,.2f}")
+            return total
+            
+        except Exception as e:
+            logger.error(f"Erro ao calcular valor dos ambientes: {str(e)}")
+            raise
+
+    async def _gerar_numero_orcamento(self, loja_id: str) -> str:
+        """Gera numeração automática para orçamento"""
+        try:
+            # TODO: Implementar lógica de numeração automática baseada na config da loja
+            # Por enquanto, gerar número simples
+            import random
+            numero = f"ORC-{random.randint(1000, 9999)}"
+            logger.debug(f"Número gerado: {numero}")
+            return numero
+            
+        except Exception as e:
+            logger.error(f"Erro ao gerar número do orçamento: {str(e)}")
+            raise
+
+    async def _get_status_padrao(self, loja_id: str) -> Dict[str, Any]:
+        """Busca status padrão da loja"""
+        try:
+            result = (
+                self.supabase
+                .table('config_status_orcamento')
+                .select('*')
+                .eq('loja_id', loja_id)
+                .eq('is_default', True)
+                .execute()
+            )
+            
+            if result.data:
+                return result.data[0]
+            else:
+                # Criar status padrão se não existir
+                status_padrao = {
+                    'nome_status': 'Negociação',
+                    'ordem': 1,
+                    'loja_id': loja_id,
+                    'bloqueia_edicao': False,
+                    'is_default': True,
+                    'is_final': False
+                }
+                
+                insert_result = (
+                    self.supabase
+                    .table('config_status_orcamento')
+                    .insert(status_padrao)
+                    .execute()
+                )
+                
+                return insert_result.data[0]
+                
+        except Exception as e:
+            logger.error(f"Erro ao buscar status padrão: {str(e)}")
+            raise
+
+    async def _inserir_ambientes_orcamento(self, orcamento_id: str, ambiente_ids: List[str]):
+        """Insere relacionamentos entre orçamento e ambientes"""
+        try:
+            relacionamentos = [
+                {
+                    'orcamento_id': orcamento_id,
+                    'ambiente_id': str(ambiente_id),
+                    'incluido': True
+                }
+                for ambiente_id in ambiente_ids
+            ]
+            
+            (
+                self.supabase
+                .table('c_orcamento_ambientes')
+                .insert(relacionamentos)
+                .execute()
+            )
+            
+        except Exception as e:
+            logger.error(f"Erro ao inserir ambientes do orçamento: {str(e)}")
+            raise
+
+    async def _inserir_custos_adicionais(self, orcamento_id: str, custos_adicionais: List):
+        """Insere custos adicionais do orçamento"""
+        try:
+            custos_db = [
+                {
+                    'orcamento_id': orcamento_id,
+                    'descricao_custo': custo.descricao_custo,
+                    'valor_custo': float(custo.valor_custo)
+                }
+                for custo in custos_adicionais
+            ]
+            
+            (
+                self.supabase
+                .table('c_orcamento_custos_adicionais')
+                .insert(custos_db)
+                .execute()
+            )
+            
+        except Exception as e:
+            logger.error(f"Erro ao inserir custos adicionais: {str(e)}")
+            raise
+
+    async def _get_ambientes_orcamento(self, orcamento_id: str) -> List[Dict]:
+        """Busca ambientes relacionados ao orçamento"""
+        try:
+            result = (
+                self.supabase
+                .table('c_orcamento_ambientes')
+                .select('''
+                    c_ambientes!inner(
+                        id,
+                        nome_ambiente,
+                        valor_total,
+                        linha_produto
+                    )
+                ''')
+                .eq('orcamento_id', orcamento_id)
+                .eq('incluido', True)
+                .execute()
+            )
+            
+            ambientes = []
+            for item in result.data:
+                ambiente = item['c_ambientes']
+                ambientes.append({
+                    'id': ambiente['id'],
+                    'nome_ambiente': ambiente['nome_ambiente'],
+                    'valor_total': ambiente['valor_total'],
+                    'linha_produto': ambiente['linha_produto']
+                })
+            
+            return ambientes
+            
+        except Exception as e:
+            logger.error(f"Erro ao buscar ambientes do orçamento: {str(e)}")
+            return []
+
+    async def _get_custos_adicionais_orcamento(self, orcamento_id: str) -> List[Dict]:
+        """Busca custos adicionais do orçamento"""
+        try:
+            result = (
+                self.supabase
+                .table('c_orcamento_custos_adicionais')
+                .select('*')
+                .eq('orcamento_id', orcamento_id)
+                .execute()
+            )
+            
+            return result.data
+            
+        except Exception as e:
+            logger.error(f"Erro ao buscar custos adicionais: {str(e)}")
+            return []
+
+    # ===== MÉTODOS DE APROVAÇÃO (placeholder para conexão futura) =====
+
+    async def solicitar_aprovacao(self, orcamento_id: str, solicitacao, current_user: Dict[str, Any]):
+        """TODO: Implementar lógica de solicitação de aprovação"""
+        return {"message": "Funcionalidade de aprovação em desenvolvimento"}
+
+    async def processar_aprovacao(self, orcamento_id: str, aprovado: bool, justificativa: str, current_user: Dict[str, Any]):
+        """TODO: Implementar lógica de processamento de aprovação"""
+        return {"message": "Funcionalidade de aprovação em desenvolvimento"}
+
+    async def calcular_custos(self, orcamento_id: str, current_user: Dict[str, Any]):
+        """TODO: Implementar retorno de custos detalhados"""
+        return {"message": "Funcionalidade de cálculo de custos em desenvolvimento"}
+
+    async def duplicar_orcamento(self, orcamento_id: str, current_user: Dict[str, Any]):
+        """TODO: Implementar duplicação de orçamento"""
+        return {"message": "Funcionalidade de duplicação em desenvolvimento"}
+
+    async def relatorio_margem(self, filtros, current_user: Dict[str, Any]):
+        """TODO: Implementar relatório de margem"""
+        return {"message": "Relatório de margem em desenvolvimento"}
+
+    async def metricas_dashboard(self, periodo_dias: int, current_user: Dict[str, Any]):
+        """TODO: Implementar métricas do dashboard"""
+        return {"message": "Métricas do dashboard em desenvolvimento"}
+
+    async def listar_status_disponiveis(self, current_user: Dict[str, Any]):
+        """TODO: Implementar listagem de status disponíveis"""
+        return {"message": "Listagem de status em desenvolvimento"}
+
+    async def historico_aprovacoes(self, orcamento_id: str, current_user: Dict[str, Any]):
+        """TODO: Implementar histórico de aprovações"""
+        return {"message": "Histórico de aprovações em desenvolvimento"}
+
+    
+    # ===== ENGINE DE CÁLCULO (MANTIDO) =====
+    
+    def calcular_comissao_faixa_unica_pandas(self, valor_venda: float, regras_df: pd.DataFrame) -> Dict[str, Any]:
+        """
+        🚨 CORREÇÃO CRÍTICA: Engine de cálculo de comissão por FAIXA ÚNICA (não progressivo)
+        
+        REGRA REAL DE NEGÓCIO:
+        - Identifica qual faixa o valor se encaixa
+        - Aplica o percentual da faixa sobre TODO o valor
+        - NÃO soma faixas anteriores (isso era o erro)
         
         Args:
             valor_venda (float): Valor da venda para calcular comissão
@@ -39,89 +648,89 @@ class OrcamentoService:
         Returns:
             Dict[str, Any]: Resultado do cálculo com detalhamento
             
-        Algoritmo conforme PRD.md:
-        ```
-        def calcular_comissao(valor_venda, regras):
-            comissao_calculada = 0
-            for regra in regras:
-                if valor_atingido_pela_faixa(valor_venda, regra.valor_minimo, regra.valor_maximo):
-                     comissao_calculada += calcular_valor_da_faixa(...)
-            return comissao_calculada
-        ```
+        Exemplos corretos:
+        - R$ 24.999 → Faixa 1 (até 25k) → 5% × R$ 24.999 = R$ 1.249,95
+        - R$ 40.000 → Faixa 2 (25k-50k) → 6% × R$ 40.000 = R$ 2.400,00
+        - R$ 100.000 → Faixa 3 (50k+) → 8% × R$ 100.000 = R$ 8.000,00
         """
         if regras_df.empty:
             logger.warning("DataFrame de regras vazio, retornando comissão zero")
             return {
                 'comissao_total': 0.0,
                 'detalhes_faixas': [],
-                'valor_total_processado': valor_venda
+                'valor_total_processado': valor_venda,
+                'faixa_aplicada': None
             }
         
-        logger.debug(f"Iniciando cálculo progressivo para valor: R$ {valor_venda:,.2f}")
+        logger.debug(f"🔧 CORREÇÃO: Cálculo por faixa única para valor: R$ {valor_venda:,.2f}")
         
-        # Implementação EXATA conforme PRD.md
-        comissao_calculada = 0.0
-        detalhes_faixas = []
+        # Ordenar regras por valor mínimo para processar em ordem
+        regras_ordenadas = regras_df.sort_values('valor_minimo')
         
-        # Processar cada regra usando lógica do PRD.md
-        for idx, regra in regras_df.iterrows():
-            if self._valor_atingido_pela_faixa(valor_venda, regra['valor_minimo'], regra['valor_maximo']):
-                valor_faixa, comissao_faixa = self._calcular_valor_da_faixa(
-                    valor_venda, 
-                    regra['valor_minimo'], 
-                    regra['valor_maximo'], 
-                    regra['percentual']
-                )
-                
-                if comissao_faixa > 0:
-                    comissao_calculada += comissao_faixa
-                    
-                    # Detalhar para auditoria
-                    detalhe = {
-                        'faixa': int(regra['ordem']),
-                        'valor_minimo': float(regra['valor_minimo']),
-                        'valor_maximo': float(regra['valor_maximo']) if pd.notna(regra['valor_maximo']) else None,
-                        'valor_faixa': float(valor_faixa),
-                        'percentual': float(regra['percentual']),
-                        'comissao_faixa': float(comissao_faixa)
-                    }
-                    detalhes_faixas.append(detalhe)
-                    
-                    logger.debug(f"Faixa {regra['ordem']}: R$ {valor_faixa:,.2f} × {regra['percentual']:.1%} = R$ {comissao_faixa:,.2f}")
+        # Encontrar a faixa onde o valor se encaixa
+        faixa_aplicada = None
+        for idx, regra in regras_ordenadas.iterrows():
+            valor_min = float(regra['valor_minimo'])
+            valor_max = float(regra['valor_maximo']) if pd.notna(regra['valor_maximo']) else float('inf')
+            
+            # Verificar se valor está nesta faixa
+            if valor_min <= valor_venda <= valor_max:
+                faixa_aplicada = regra
+                break
         
-        resultado = {
-            'comissao_total': float(comissao_calculada),
-            'detalhes_faixas': detalhes_faixas,
-            'valor_total_processado': float(valor_venda)
+        if faixa_aplicada is None:
+            logger.warning(f"Nenhuma faixa encontrada para valor R$ {valor_venda:,.2f}")
+            return {
+                'comissao_total': 0.0,
+                'detalhes_faixas': [],
+                'valor_total_processado': valor_venda,
+                'faixa_aplicada': None
+            }
+        
+        # Calcular comissão: percentual da faixa × valor total
+        percentual_faixa = float(faixa_aplicada['percentual'])
+        comissao_total = valor_venda * percentual_faixa
+        
+        # Detalhar para auditoria
+        detalhe_faixa = {
+            'faixa': int(faixa_aplicada['ordem']),
+            'valor_minimo': float(faixa_aplicada['valor_minimo']),
+            'valor_maximo': float(faixa_aplicada['valor_maximo']) if pd.notna(faixa_aplicada['valor_maximo']) else None,
+            'percentual': percentual_faixa,
+            'valor_total_aplicado': float(valor_venda),
+            'comissao_calculada': float(comissao_total)
         }
         
-        logger.info(f"Cálculo concluído: R$ {valor_venda:,.2f} → R$ {comissao_calculada:,.2f} ({len(detalhes_faixas)} faixas)")
+        resultado = {
+            'comissao_total': float(comissao_total),
+            'detalhes_faixas': [detalhe_faixa],  # Sempre uma única faixa
+            'valor_total_processado': float(valor_venda),
+            'faixa_aplicada': int(faixa_aplicada['ordem'])
+        }
+        
+        logger.info(f"✅ Faixa {faixa_aplicada['ordem']}: R$ {valor_venda:,.2f} × {percentual_faixa:.1%} = R$ {comissao_total:,.2f}")
+        
         return resultado
-    
+
+    # Manter método antigo por compatibilidade, mas redirecionar para o correto
+    def calcular_comissao_progressiva_pandas(self, valor_venda: float, regras_df: pd.DataFrame) -> Dict[str, Any]:
+        """
+        🚨 MÉTODO DEPRECIADO: Redirecionando para cálculo correto por faixa única
+        
+        AVISO: O nome "progressiva" estava incorreto. Comissão real é por faixa única.
+        Este método mantido apenas para compatibilidade, mas chama o algoritmo correto.
+        """
+        logger.warning("⚠️ Método 'progressiva' depreciado. Usando cálculo correto por faixa única.")
+        return self.calcular_comissao_faixa_unica_pandas(valor_venda, regras_df)
+
     def _valor_atingido_pela_faixa(self, valor_venda: float, valor_minimo: float, valor_maximo: Optional[float]) -> bool:
         """
-        Verifica se o valor da venda atinge esta faixa de comissão
-        Implementa a lógica: valor_atingido_pela_faixa(valor_venda, regra.valor_minimo, regra.valor_maximo)
+        🚨 MÉTODO DEPRECIADO: Era usado no algoritmo progressivo incorreto
         
-        Args:
-            valor_venda: Valor total da venda
-            valor_minimo: Valor mínimo da faixa
-            valor_maximo: Valor máximo da faixa (None = infinito)
-            
-        Returns:
-            bool: True se valor_venda está dentro desta faixa
-            
-        Exemplo:
-        - Faixa: R$ 10.000 → R$ 25.000
-        - Venda: R$ 30.000
-        - Retorna: True (porque parte da venda está nesta faixa)
+        Mantido apenas para compatibilidade. O novo algoritmo usa lógica mais simples.
         """
-        # Se venda não atingiu nem o mínimo desta faixa
-        if valor_venda <= valor_minimo:
-            return False
-            
-        # Venda atingiu pelo menos o valor mínimo desta faixa
-        return True
+        valor_max_efetivo = valor_maximo if valor_maximo is not None and not pd.isna(valor_maximo) else float('inf')
+        return valor_minimo <= valor_venda <= valor_max_efetivo
     
     def _calcular_valor_da_faixa(
         self, 
@@ -131,41 +740,20 @@ class OrcamentoService:
         percentual: float
     ) -> tuple[float, float]:
         """
-        Calcula o valor aplicável e comissão para uma faixa específica
-        Implementa: calcular_valor_da_faixa(valor_venda, regra.valor_minimo, regra.valor_maximo, regra.percentual)
+        🚨 MÉTODO DEPRECIADO: Era usado no algoritmo progressivo incorreto
         
-        Args:
-            valor_venda: Valor total da venda
-            valor_minimo: Valor mínimo da faixa
-            valor_maximo: Valor máximo da faixa (None = infinito)
-            percentual: Percentual de comissão da faixa
-            
-        Returns:
-            tuple[float, float]: (valor_aplicavel_na_faixa, comissao_da_faixa)
-            
-        Exemplo:
-        - Venda: R$ 30.000
-        - Faixa: R$ 10.000 → R$ 25.000 (5%)
-        - Valor aplicável: R$ 15.000 (25.000 - 10.000)
-        - Comissão: R$ 750 (15.000 × 5%)
+        Novo algoritmo simplesmente aplica: valor_total × percentual_faixa
         """
-        # Determinar valor máximo efetivo (infinito se None)
+        # Para compatibilidade, retornar como se fosse faixa única
         valor_max_efetivo = valor_maximo if valor_maximo is not None and not pd.isna(valor_maximo) else float('inf')
         
-        # Calcular valor aplicável nesta faixa
-        valor_inicio_faixa = max(valor_venda, valor_minimo)  # Onde começamos nesta faixa
-        valor_fim_faixa = min(valor_venda, valor_max_efetivo)  # Onde terminamos nesta faixa
-        
-        # Valor efetivamente dentro desta faixa
-        valor_aplicavel = max(0, valor_fim_faixa - valor_minimo)
-        
-        # Comissão desta faixa
-        comissao_faixa = valor_aplicavel * percentual
-        
-        logger.debug(f"Faixa R$ {valor_minimo:,.0f} → R$ {valor_max_efetivo if valor_max_efetivo != float('inf') else '∞'}: valor aplicável R$ {valor_aplicavel:,.2f}")
-        
-        return valor_aplicavel, comissao_faixa
-    
+        if valor_minimo <= valor_venda <= valor_max_efetivo:
+            # Valor se encaixa nesta faixa - aplicar sobre total
+            return valor_venda, valor_venda * percentual
+        else:
+            # Valor não se encaixa nesta faixa
+            return 0.0, 0.0
+
     async def calcular_orcamento_completo(self, dados_orcamento: Dict[str, Any]) -> Dict[str, Any]:
         """
         Calcula orçamento completo com todos os custos usando engine Pandas
@@ -285,12 +873,12 @@ class OrcamentoService:
         
         # 2. Comissão vendedor (progressiva com Pandas)
         regras_vendedor_df = await self.repository.get_regras_comissao(loja_id, 'VENDEDOR')
-        comissao_vendedor_calc = self.calcular_comissao_progressiva_pandas(valor_final, regras_vendedor_df)
+        comissao_vendedor_calc = self.calcular_comissao_faixa_unica_pandas(valor_final, regras_vendedor_df)
         custos_detalhes['comissao_vendedor'] = comissao_vendedor_calc['comissao_total']
         
         # 3. Comissão gerente (progressiva com Pandas) 
         regras_gerente_df = await self.repository.get_regras_comissao(loja_id, 'GERENTE')
-        comissao_gerente_calc = self.calcular_comissao_progressiva_pandas(valor_final, regras_gerente_df)
+        comissao_gerente_calc = self.calcular_comissao_faixa_unica_pandas(valor_final, regras_gerente_df)
         custos_detalhes['comissao_gerente'] = comissao_gerente_calc['comissao_total']
         
         # 4. Custo medidor
@@ -454,7 +1042,7 @@ class OrcamentoService:
         
         # Testar com valor do exemplo: R$ 40.000
         valor_teste = 40000.0
-        resultado = self.calcular_comissao_progressiva_pandas(valor_teste, regras_teste)
+        resultado = self.calcular_comissao_faixa_unica_pandas(valor_teste, regras_teste)
         
         # Validar resultado
         esperado = 2150.0  # Conforme PRD.md
@@ -475,445 +1063,3 @@ class OrcamentoService:
         logger.info(f"🎯 DEMO Resultado: R$ {valor_teste:,.2f} → R$ {atual:,.2f} (esperado: R$ {esperado:,.2f}) - {demo_result['algoritmo_status']}")
         
         return demo_result
-
-    # ===== MÉTODOS CRUD PARA CONTROLLERS =====
-    
-    async def criar_orcamento(self, orcamento_data: OrcamentoCreate, current_user: Dict[str, Any]) -> OrcamentoResponse:
-        """
-        Cria novo orçamento com cálculos automáticos
-        
-        Args:
-            orcamento_data: Dados do orçamento
-            current_user: Usuário autenticado
-            
-        Returns:
-            OrcamentoResponse: Orçamento criado com todos os cálculos
-        """
-        try:
-            loja_id = current_user['loja_id']
-            vendedor_id = current_user['user_id']
-            
-            logger.info(f"Criando orçamento para cliente {orcamento_data.cliente_id}, loja {loja_id}")
-            
-            # 1. Buscar valores dos ambientes
-            valor_ambientes = await self.repository.calcular_valor_total_ambientes(orcamento_data.ambiente_ids)
-            
-            # 2. Calcular valor final com desconto
-            desconto_decimal = float(orcamento_data.desconto_percentual) / 100
-            valor_final = valor_ambientes * (1 - desconto_decimal)
-            
-            # 3. Validar limite de desconto
-            validacao_desconto = await self.validar_limite_desconto(loja_id, vendedor_id, desconto_decimal)
-            
-            # 4. Calcular todos os custos
-            dados_calculo = {
-                'loja_id': loja_id,
-                'vendedor_id': vendedor_id,
-                'valor_ambientes': valor_ambientes,
-                'valor_final': valor_final,
-                'custos_adicionais': [
-                    {'descricao_custo': c.descricao_custo, 'valor_custo': float(c.valor_custo)}
-                    for c in (orcamento_data.custos_adicionais or [])
-                ],
-                'montador_id': str(orcamento_data.montador_selecionado_id),
-                'medidor_id': str(orcamento_data.medidor_selecionado_id),
-                'transportadora_id': str(orcamento_data.transportadora_selecionada_id)
-            }
-            
-            calculo = await self.calcular_orcamento_completo(dados_calculo)
-            
-            # 5. Preparar dados para salvar
-            orcamento_db = {
-                'cliente_id': str(orcamento_data.cliente_id),
-                'loja_id': loja_id,
-                'vendedor_id': vendedor_id,
-                'medidor_selecionado_id': str(orcamento_data.medidor_selecionado_id),
-                'montador_selecionado_id': str(orcamento_data.montador_selecionado_id),
-                'transportadora_selecionada_id': str(orcamento_data.transportadora_selecionada_id),
-                'valor_ambientes': valor_ambientes,
-                'desconto_percentual': desconto_decimal,
-                'valor_final': valor_final,
-                'custo_fabrica': calculo['custos']['custo_fabrica'],
-                'comissao_vendedor': calculo['custos']['comissao_vendedor'],
-                'comissao_gerente': calculo['custos']['comissao_gerente'],
-                'custo_medidor': calculo['custos']['custo_medidor'],
-                'custo_montador': calculo['custos']['custo_montador'],
-                'custo_frete': calculo['custos']['custo_frete'],
-                'margem_lucro': calculo['margem_lucro'],
-                'necessita_aprovacao': validacao_desconto['necessita_aprovacao'],
-                'plano_pagamento': json.dumps([p.dict() for p in orcamento_data.plano_pagamento]),
-                'observacoes': orcamento_data.observacoes,
-                'config_snapshot': json.dumps(calculo.get('config_snapshot', {}))
-            }
-            
-            # 6. Salvar no banco
-            orcamento_criado = await self.repository.criar_orcamento(orcamento_db)
-            
-            # 7. Salvar ambientes e custos adicionais
-            await self.repository.salvar_orcamento_ambientes(orcamento_criado['id'], orcamento_data.ambiente_ids)
-            
-            if orcamento_data.custos_adicionais:
-                await self.repository.salvar_custos_adicionais(orcamento_criado['id'], orcamento_data.custos_adicionais)
-            
-            logger.info(f"Orçamento {orcamento_criado['numero']} criado com sucesso")
-            
-            # 8. Retornar resposta formatada
-            return await self._format_orcamento_response(orcamento_criado, current_user)
-            
-        except Exception as e:
-            logger.error(f"Erro ao criar orçamento: {str(e)}")
-            raise Exception(f"Erro ao criar orçamento: {str(e)}")
-    
-    async def listar_orcamentos(self, filters: OrcamentoFilters, current_user: Dict[str, Any], skip: int = 0, limit: int = 50) -> List[OrcamentoListItem]:
-        """
-        Lista orçamentos com filtros aplicados
-        
-        Args:
-            filters: Filtros de busca
-            current_user: Usuário autenticado
-            skip: Registros para pular
-            limit: Limite de registros
-            
-        Returns:
-            List[OrcamentoListItem]: Lista de orçamentos
-        """
-        try:
-            logger.debug(f"Listando orçamentos para usuário {current_user['perfil']}")
-            
-            # Aplicar filtros baseados no perfil
-            if current_user['perfil'] == 'VENDEDOR':
-                filters.vendedor_id = current_user['user_id']
-            elif current_user['perfil'] in ['GERENTE']:
-                # Gerente vê toda a loja
-                pass
-            elif current_user['perfil'] == 'ADMIN_MASTER':
-                # Admin Master vê tudo
-                pass
-            
-            orcamentos = await self.repository.listar_orcamentos(filters, current_user['loja_id'], skip, limit)
-            
-            return [OrcamentoListItem(**orc) for orc in orcamentos]
-            
-        except Exception as e:
-            logger.error(f"Erro ao listar orçamentos: {str(e)}")
-            raise Exception(f"Erro ao listar orçamentos: {str(e)}")
-    
-    async def obter_orcamento(self, orcamento_id: uuid.UUID, current_user: Dict[str, Any]) -> OrcamentoResponse:
-        """
-        Obtém detalhes de um orçamento específico
-        
-        Args:
-            orcamento_id: ID do orçamento
-            current_user: Usuário autenticado
-            
-        Returns:
-            OrcamentoResponse: Dados do orçamento
-        """
-        try:
-            orcamento = await self.repository.obter_orcamento_por_id(str(orcamento_id))
-            
-            if not orcamento:
-                raise Exception("Orçamento não encontrado")
-            
-            # Verificar permissões
-            if not await self._verificar_permissao_orcamento(orcamento, current_user):
-                raise Exception("Sem permissão para acessar este orçamento")
-            
-            return await self._format_orcamento_response(orcamento, current_user)
-            
-        except Exception as e:
-            logger.error(f"Erro ao obter orçamento {orcamento_id}: {str(e)}")
-            raise Exception(f"Erro ao obter orçamento: {str(e)}")
-    
-    async def atualizar_orcamento(self, orcamento_id: uuid.UUID, orcamento_data: OrcamentoUpdate, current_user: Dict[str, Any]) -> OrcamentoResponse:
-        """
-        Atualiza um orçamento existente
-        
-        Args:
-            orcamento_id: ID do orçamento
-            orcamento_data: Dados para atualização
-            current_user: Usuário autenticado
-            
-        Returns:
-            OrcamentoResponse: Orçamento atualizado
-        """
-        try:
-            # 1. Verificar se orçamento existe e permissões
-            orcamento_atual = await self.repository.obter_orcamento_por_id(str(orcamento_id))
-            
-            if not orcamento_atual:
-                raise Exception("Orçamento não encontrado")
-            
-            if not await self._verificar_permissao_orcamento(orcamento_atual, current_user):
-                raise Exception("Sem permissão para editar este orçamento")
-            
-            # 2. Preparar dados de atualização apenas com campos não-nulos
-            dados_atualizacao = {}
-            recalcular_custos = False
-            
-            if orcamento_data.desconto_percentual is not None:
-                dados_atualizacao['desconto_percentual'] = float(orcamento_data.desconto_percentual) / 100
-                recalcular_custos = True
-            
-            if orcamento_data.medidor_selecionado_id:
-                dados_atualizacao['medidor_selecionado_id'] = str(orcamento_data.medidor_selecionado_id)
-                recalcular_custos = True
-            
-            if orcamento_data.montador_selecionado_id:
-                dados_atualizacao['montador_selecionado_id'] = str(orcamento_data.montador_selecionado_id)
-                recalcular_custos = True
-            
-            if orcamento_data.transportadora_selecionada_id:
-                dados_atualizacao['transportadora_selecionada_id'] = str(orcamento_data.transportadora_selecionada_id)
-                recalcular_custos = True
-            
-            if orcamento_data.plano_pagamento:
-                dados_atualizacao['plano_pagamento'] = json.dumps([p.dict() for p in orcamento_data.plano_pagamento])
-            
-            if orcamento_data.observacoes is not None:
-                dados_atualizacao['observacoes'] = orcamento_data.observacoes
-            
-            # 3. Recalcular custos se necessário
-            if recalcular_custos:
-                valor_final = float(orcamento_atual['valor_ambientes']) * (1 - dados_atualizacao.get('desconto_percentual', float(orcamento_atual['desconto_percentual'])))
-                
-                dados_calculo = {
-                    'loja_id': orcamento_atual['loja_id'],
-                    'vendedor_id': orcamento_atual['vendedor_id'],
-                    'valor_ambientes': float(orcamento_atual['valor_ambientes']),
-                    'valor_final': valor_final,
-                    'custos_adicionais': orcamento_data.custos_adicionais or [],
-                    'montador_id': dados_atualizacao.get('montador_selecionado_id', orcamento_atual['montador_selecionado_id']),
-                    'medidor_id': dados_atualizacao.get('medidor_selecionado_id', orcamento_atual['medidor_selecionado_id']),
-                    'transportadora_id': dados_atualizacao.get('transportadora_selecionada_id', orcamento_atual['transportadora_selecionada_id'])
-                }
-                
-                calculo = await self.calcular_orcamento_completo(dados_calculo)
-                
-                dados_atualizacao.update({
-                    'valor_final': valor_final,
-                    'custo_fabrica': calculo['custos']['custo_fabrica'],
-                    'comissao_vendedor': calculo['custos']['comissao_vendedor'],
-                    'comissao_gerente': calculo['custos']['comissao_gerente'],
-                    'custo_medidor': calculo['custos']['custo_medidor'],
-                    'custo_montador': calculo['custos']['custo_montador'],
-                    'custo_frete': calculo['custos']['custo_frete'],
-                    'margem_lucro': calculo['margem_lucro']
-                })
-            
-            # 4. Atualizar no banco
-            orcamento_atualizado = await self.repository.atualizar_orcamento(str(orcamento_id), dados_atualizacao)
-            
-            # 5. Atualizar custos adicionais se fornecidos
-            if orcamento_data.custos_adicionais is not None:
-                await self.repository.atualizar_custos_adicionais(str(orcamento_id), orcamento_data.custos_adicionais)
-            
-            logger.info(f"Orçamento {orcamento_id} atualizado com sucesso")
-            
-            return await self._format_orcamento_response(orcamento_atualizado, current_user)
-            
-        except Exception as e:
-            logger.error(f"Erro ao atualizar orçamento {orcamento_id}: {str(e)}")
-            raise Exception(f"Erro ao atualizar orçamento: {str(e)}")
-    
-    async def excluir_orcamento(self, orcamento_id: uuid.UUID, current_user: Dict[str, Any]):
-        """
-        Exclui um orçamento (soft delete)
-        
-        Args:
-            orcamento_id: ID do orçamento
-            current_user: Usuário autenticado
-        """
-        try:
-            orcamento = await self.repository.obter_orcamento_por_id(str(orcamento_id))
-            
-            if not orcamento:
-                raise Exception("Orçamento não encontrado")
-            
-            if not await self._verificar_permissao_orcamento(orcamento, current_user):
-                raise Exception("Sem permissão para excluir este orçamento")
-            
-            # Verificar se pode ser excluído (apenas em status negociação)
-            if orcamento.get('status_nome', '').upper() not in ['NEGOCIACAO', 'NEGOCIAÇÃO']:
-                raise Exception("Apenas orçamentos em negociação podem ser excluídos")
-            
-            await self.repository.excluir_orcamento(str(orcamento_id))
-            
-            logger.info(f"Orçamento {orcamento_id} excluído com sucesso")
-            
-        except Exception as e:
-            logger.error(f"Erro ao excluir orçamento {orcamento_id}: {str(e)}")
-            raise Exception(f"Erro ao excluir orçamento: {str(e)}")
-    
-    async def solicitar_aprovacao(self, orcamento_id: uuid.UUID, solicitacao: SolicitacaoAprovacao, current_user: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Solicita aprovação para desconto
-        
-        Args:
-            orcamento_id: ID do orçamento
-            solicitacao: Dados da solicitação
-            current_user: Usuário autenticado
-            
-        Returns:
-            Dict: Resultado da solicitação
-        """
-        try:
-            orcamento = await self.repository.obter_orcamento_por_id(str(orcamento_id))
-            
-            if not orcamento:
-                raise Exception("Orçamento não encontrado")
-            
-            # Validar desconto solicitado
-            desconto_decimal = float(solicitacao.desconto_solicitado) / 100
-            validacao = await self.validar_limite_desconto(orcamento['loja_id'], current_user['user_id'], desconto_decimal)
-            
-            if not validacao['necessita_aprovacao']:
-                raise Exception("Este desconto pode ser aplicado diretamente")
-            
-            # Registrar solicitação de aprovação
-            aprovacao_id = await self.repository.criar_solicitacao_aprovacao({
-                'orcamento_id': str(orcamento_id),
-                'solicitante_id': current_user['user_id'],
-                'desconto_solicitado': desconto_decimal,
-                'justificativa': solicitacao.justificativa,
-                'nivel_aprovacao': validacao['nivel_aprovacao_necessario']
-            })
-            
-            logger.info(f"Solicitação de aprovação criada para orçamento {orcamento_id}")
-            
-            return {
-                'aprovacao_id': aprovacao_id,
-                'nivel_aprovacao': validacao['nivel_aprovacao_necessario'],
-                'desconto_solicitado': solicitacao.desconto_solicitado,
-                'status': 'AGUARDANDO_APROVACAO'
-            }
-            
-        except Exception as e:
-            logger.error(f"Erro ao solicitar aprovação para orçamento {orcamento_id}: {str(e)}")
-            raise Exception(f"Erro ao solicitar aprovação: {str(e)}")
-    
-    async def processar_aprovacao(self, orcamento_id: uuid.UUID, aprovado: bool, justificativa: Optional[str], current_user: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Processa uma solicitação de aprovação
-        
-        Args:
-            orcamento_id: ID do orçamento
-            aprovado: True para aprovar, False para rejeitar
-            justificativa: Justificativa da decisão
-            current_user: Usuário autenticado (aprovador)
-            
-        Returns:
-            Dict: Resultado da aprovação
-        """
-        try:
-            # Implementar lógica de aprovação
-            # TODO: Implementar verificação de hierarquia de aprovação
-            
-            resultado = await self.repository.processar_aprovacao(str(orcamento_id), {
-                'aprovador_id': current_user['user_id'],
-                'aprovado': aprovado,
-                'justificativa': justificativa,
-                'acao': 'APROVADO' if aprovado else 'REJEITADO'
-            })
-            
-            logger.info(f"Aprovação processada para orçamento {orcamento_id}: {'APROVADO' if aprovado else 'REJEITADO'}")
-            
-            return resultado
-            
-        except Exception as e:
-            logger.error(f"Erro ao processar aprovação para orçamento {orcamento_id}: {str(e)}")
-            raise Exception(f"Erro ao processar aprovação: {str(e)}")
-    
-    # ===== MÉTODOS AUXILIARES =====
-    
-    async def _verificar_permissao_orcamento(self, orcamento: Dict[str, Any], current_user: Dict[str, Any]) -> bool:
-        """
-        Verifica se usuário tem permissão para acessar o orçamento
-        
-        Args:
-            orcamento: Dados do orçamento
-            current_user: Usuário autenticado
-            
-        Returns:
-            bool: True se tem permissão
-        """
-        try:
-            # Admin Master vê tudo
-            if current_user['perfil'] == 'ADMIN_MASTER':
-                return True
-            
-            # Verificar se é da mesma loja
-            if orcamento['loja_id'] != current_user['loja_id']:
-                return False
-            
-            # Vendedor só vê seus próprios
-            if current_user['perfil'] == 'VENDEDOR':
-                return orcamento['vendedor_id'] == current_user['user_id']
-            
-            # Gerente vê todos da loja
-            if current_user['perfil'] == 'GERENTE':
-                return True
-            
-            return False
-            
-        except Exception as e:
-            logger.error(f"Erro ao verificar permissão: {str(e)}")
-            return False
-    
-    async def _format_orcamento_response(self, orcamento: Dict[str, Any], current_user: Dict[str, Any]) -> OrcamentoResponse:
-        """
-        Formata resposta do orçamento baseado no perfil do usuário
-        
-        Args:
-            orcamento: Dados do orçamento
-            current_user: Usuário autenticado
-            
-        Returns:
-            OrcamentoResponse: Resposta formatada
-        """
-        try:
-            # Buscar dados relacionados
-            ambientes = await self.repository.obter_ambientes_orcamento(orcamento['id'])
-            custos_adicionais = await self.repository.obter_custos_adicionais(orcamento['id'])
-            
-            # Montar resumo financeiro baseado no perfil
-            resumo_financeiro = {
-                'valor_ambientes': orcamento['valor_ambientes'],
-                'desconto_aplicado': orcamento['valor_ambientes'] * orcamento['desconto_percentual'],
-                'valor_final': orcamento['valor_final']
-            }
-            
-            # Admin Master vê custos detalhados
-            if current_user['perfil'] == 'ADMIN_MASTER':
-                resumo_financeiro.update({
-                    'custo_fabrica': orcamento.get('custo_fabrica'),
-                    'comissao_vendedor': orcamento.get('comissao_vendedor'),
-                    'comissao_gerente': orcamento.get('comissao_gerente'),
-                    'custo_medidor': orcamento.get('custo_medidor'),
-                    'custo_montador': orcamento.get('custo_montador'),
-                    'custo_frete': orcamento.get('custo_frete'),
-                    'total_custos_adicionais': sum(c.get('valor_custo', 0) for c in custos_adicionais),
-                    'margem_lucro': orcamento.get('margem_lucro')
-                })
-            
-            return OrcamentoResponse(
-                id=orcamento['id'],
-                numero=orcamento['numero'],
-                cliente_id=orcamento['cliente_id'],
-                loja_id=orcamento['loja_id'],
-                vendedor_id=orcamento['vendedor_id'],
-                status_id=orcamento.get('status_id'),
-                resumo_financeiro=resumo_financeiro,
-                ambientes=ambientes,
-                custos_adicionais=custos_adicionais,
-                plano_pagamento=json.loads(orcamento.get('plano_pagamento', '[]')),
-                necessita_aprovacao=orcamento.get('necessita_aprovacao', False),
-                aprovador_id=orcamento.get('aprovador_id'),
-                observacoes=orcamento.get('observacoes'),
-                created_at=orcamento['created_at'],
-                updated_at=orcamento['updated_at']
-            )
-            
-        except Exception as e:
-            logger.error(f"Erro ao formatar resposta do orçamento: {str(e)}")
-            raise Exception(f"Erro ao formatar resposta: {str(e)}")

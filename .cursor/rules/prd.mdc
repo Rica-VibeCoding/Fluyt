@@ -1,3 +1,13 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# PRD - Sistema de Orçamento para Móveis Planejados
+
+## 📋 Visão Geral
+
+### Objetivo
 # PRD - Sistema de Orçamento para Móveis Planejados
 
 ## 📋 Visão Geral
@@ -229,14 +239,22 @@ Estes são custos eventuais específicos de um orçamento que não se enquadram 
 - Efeito imediato no sistema
 
 **Regras de Comissão:**
-- Sistema escalonado por faixa de valor
+- Sistema por faixa única de valor (não progressivo)
+- A venda se enquadra em UMA faixa e recebe o percentual dessa faixa sobre o valor total
 - Configuração: valor_mínimo → valor_máximo = percentual
-- Exemplo:
+- Exemplo de configuração:
   ```
-  R$ 0 → R$ 10.000 = 3%
-  R$ 10.001 → R$ 25.000 = 5%
-  R$ 25.001 → ∞ = 7%
+  Faixa 1: R$ 0 → R$ 25.000 = 5%
+  Faixa 2: R$ 25.001 → R$ 50.000 = 6%  
+  Faixa 3: R$ 50.001 → ∞ = 8%
   ```
+
+**Exemplos de Cálculo (Faixa Única):**
+- Venda R$ 25.000 → Faixa 1 → 5% × R$ 25.000 = R$ 1.250
+- Venda R$ 40.000 → Faixa 2 → 6% × R$ 40.000 = R$ 2.400
+- Venda R$ 100.000 → Faixa 3 → 8% × R$ 100.000 = R$ 8.000
+
+**⚠️ IMPORTANTE:** O sistema NÃO é progressivo. Cada venda recebe apenas o percentual da faixa em que se enquadra, aplicado sobre o valor total da venda.
 
 **Custos Operacionais:**
 - Deflator para custo fábrica (%)
@@ -426,30 +444,30 @@ GET /relatorios/margem
 - Verificação de mínimo garantido
 - Cálculo de margem final
 
-**Algoritmo de Comissão (Exemplo Simplificado):**
+**Algoritmo de Comissão (Faixa Única):**
 ```python
-def calcular_comissao(valor_venda, perfil, loja_id, user_id): # Adicionado user_id para mínimo garantido
+def calcular_comissao(valor_venda, perfil, loja_id, user_id):
     regras = get_regras_comissao(perfil, loja_id) # Busca regras para Vendedor ou Gerente
     comissao_calculada = 0
 
-    # Lógica de comissão progressiva por faixa (detalhar conforme Task Board)
-    # Exemplo simplificado abaixo considera apenas uma faixa que se aplique
+    # Lógica de comissão por FAIXA ÚNICA
+    # A venda se enquadra em apenas UMA faixa e recebe o percentual dessa faixa
     for regra in regras:
-        # Aqui a lógica real seria mais complexa para aplicar faixas progressivas
-        # Este é um placeholder para a lógica correta de faixas
-        if valor_atingido_pela_faixa(valor_venda, regra.valor_minimo, regra.valor_maximo):
-             comissao_calculada += calcular_valor_da_faixa(valor_venda, regra.valor_minimo, regra.valor_maximo, regra.percentual)
+        if valor_venda >= regra.valor_minimo and (regra.valor_maximo is None or valor_venda <= regra.valor_maximo):
+            # Aplica o percentual da faixa sobre o VALOR TOTAL da venda
+            comissao_calculada = valor_venda * (regra.percentual / 100)
+            break  # Para na primeira faixa que se enquadra
     
     if perfil == 'VENDEDOR': # Mínimo garantido só se aplica a vendedor
-        minimo = get_minimo_garantido(user_id, loja_id) # Busca o mínimo garantido do vendedor
+        minimo = get_minimo_garantido(user_id, loja_id)
         if comissao_calculada < minimo:
-            # Nota: O pagamento será o mínimo, mas a comissão para cálculo de margem do orçamento é a calculada.
-            # A diferença é um custo operacional da loja, não do orçamento específico.
-            pass # A comissão para o orçamento permanece a calculada. O pagamento ao vendedor é outra questão.
+            # Nota: O pagamento será o mínimo, mas a comissão para cálculo de margem permanece a calculada
+            # A diferença é custo operacional da loja, não do orçamento específico
+            pass
 
     return comissao_calculada # Retorna a comissão que impacta o orçamento
 ```
-*Nota: O algoritmo de comissão progressiva real será mais elaborado para tratar corretamente as faixas, conforme definido no Task Board. O tratamento do "Mínimo Garantido" também precisa de atenção para distinguir o valor pago ao vendedor versus o custo de comissão alocado ao orçamento.*
+*Nota: O sistema de comissão é por faixa única. Cada venda se enquadra em apenas uma faixa e recebe o percentual dessa faixa aplicado sobre o valor total da venda. O "Mínimo Garantido" é um custo operacional da loja que não afeta o cálculo de margem do orçamento específico.*
 
 ---
 
